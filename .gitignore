@@ -1,0 +1,33 @@
+# 构建产物
+build/
+sdkconfig.old
+*.pyc
+*.pyo
+__pycache__/
+
+# ESP-IDF 依赖
+managed_components/
+dependencies.lock
+
+# CMake 生成文件
+CMakeLists.txt.user
+cmake-build-*/
+
+# IDE 文件
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# 调试/输出文件
+*.log
+*.bin
+*.elf
+*.map
+*.hex
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
