@@ -24,4 +24,5 @@ void app_main(void)
     delta_test_move();
     ESP_LOGI(TAG, "dalta test compelete...");
     vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
