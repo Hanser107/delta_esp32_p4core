@@ -14,4 +14,11 @@
 
 
 void delta_init(void);
-esp_err_t delta_go_to(float x, float y, float z);
+
+esp_err_t delta_go_to(float x, float y, float z,
+                            uint32_t speed, uint8_t accel,
+                            uint32_t timeout_ms);
+
+esp_err_t delta_move_linear(float x, float y, float z,
+                            uint32_t speed, uint8_t accel,
+                            uint32_t timeout_ms);

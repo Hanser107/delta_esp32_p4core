@@ -121,6 +121,11 @@ step_motor_state_t step_motor_get_state(step_motor_handle_t handle);
  */
 esp_err_t step_motor_global_sync_trigger(motor_feedback_handle_t fb,
                                          uint32_t timeout_ms);
+/**
+ * @brief 强制将电机状态设为 IDLE（由 9F 回调调用）
+ */
+esp_err_t step_motor_force_idle(step_motor_handle_t handle);
+
 
 #ifdef __cplusplus
 }

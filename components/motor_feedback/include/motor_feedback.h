@@ -40,7 +40,7 @@ typedef enum {
 typedef enum {
     MOTOR_STATUS_OK         = 0x02,  ///< 命令正确执行
     MOTOR_STATUS_AT_ZERO    = 0x12,  ///< 回零时已在零点 / 限位已触发
-    MOTOR_STATUS_REACHED    = 0x02,  ///< 动作执行完成（到位 / 回零完成 / 夹紧）
+    MOTOR_STATUS_REACHED    = 0x9F,  ///< 动作执行完成（到位 / 回零完成 / 夹紧）
     MOTOR_STATUS_PARAM_ERR  = 0xE2,  ///< 参数错误或条件不满足
     MOTOR_STATUS_FORMAT_ERR = 0xEE,  ///< 命令格式错误
 } motor_status_code_t;

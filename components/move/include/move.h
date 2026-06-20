@@ -38,6 +38,7 @@ void move_fb_test(void);
 void move_global_sync(void);
 void motor_move_test(void);
 void delta_test_move(void);
+void motor_angle_test(void);
 
 #ifdef __cplusplus
 }

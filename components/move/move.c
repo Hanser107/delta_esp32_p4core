@@ -14,10 +14,11 @@ extern motor_feedback_handle_t fb;
 #define PULSES_PER_REV     3200.0f    // 16 细分：3200 脉冲/圈
 #define DEG_PER_REV         360.0f    // 一圈 360°
 #define ENC_MAX            65536.0f   // 编码器满量程（16-bit + 插值？实际 65536）
-#define ANGLE_MIN          (-20.0f)     // 钳位下限（°）
-#define ANGLE_MAX           85.0f     // 钳位上限（°）
+#define ANGLE_MIN          (-15.0f)     // 钳位下限（°）
+#define ANGLE_MAX           80.0f     // 钳位上限（°）
 #define PULSES_MIN          0
 #define PULSES_MAX          32768
+#define GEAR_RATIO          2.5f      // i = Z2/Z1 = 50/20（减速传动）
 #define REACH_TOLERANCE      0.8f     // 到位容差（°）
 /* ---- 三个电机的当前目标角度（move 模块内部维护） ---- */
 static float last_target_angle[3] = {0, 0, 0};
@@ -44,12 +45,14 @@ static inline uint32_t clamp_pulses(uint32_t pulses) {
 /** 将任意角度转换为 0-360° 无符号表示 */
 static float pulses_to_angle(uint32_t pulses)
 {
-    return (float)pulses / ENC_MAX * DEG_PER_REV;
+    float motor_angle = (float)pulses / ENC_MAX * DEG_PER_REV;
+    return motor_angle / GEAR_RATIO;   // 电机角度 → 上臂角度
 }
 /** 将要角度转换为对应脉冲数 */
 static int32_t angle_to_pulses(float angle)
 {
-    return (int32_t)(angle / DEG_PER_REV * PULSES_PER_REV);
+    float motor_angle = angle * GEAR_RATIO;   // 上臂角度 → 电机角度
+    return (int32_t)(motor_angle / DEG_PER_REV * PULSES_PER_REV);
 }
 
 /* ---------- 内部函数：更新三个电机的实际位置 ---------- */
@@ -72,7 +75,7 @@ static esp_err_t motor_to_homing(step_motor_handle_t motors[3], uint8_t homing_m
             ESP_LOGE(TAG, "Motor %d homing command failed", i+1);
             return ret;
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
     return ESP_OK;
 }
@@ -100,11 +103,19 @@ static esp_err_t motor_abs_to_move(int32_t target_pulses[3], uint16_t speed, uin
                                            timeout_ms);
         ESP_LOGI(TAG, "Motor CMD MOVE: dir:%d, pulses:%ld", dir, pulses[i]);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Motor %d cmd failed: %d", i+1, ret);
+            ESP_LOGE(TAG, "Motor %d cmd failed: %x", i+1, ret);
             return ret;
         }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
+    vTaskDelay(pdMS_TO_TICKS(50));
     step_motor_global_sync_trigger(fb, timeout_ms);
+    for (int i = 0; i < 3; i++) {
+        esp_err_t ret = step_motor_notify_sync_started(motors[i]);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Motor %d sync start notify failed", i+1);
+        }
+    }
     return ESP_OK;
 }
 /* ---------- 公共 API ---------- */
@@ -165,33 +176,55 @@ esp_err_t move_abs(float a1, float a2, float a3, uint16_t speed, uint8_t accel, 
 
 esp_err_t move_wait_all_reached(uint32_t timeout_ms)
 {
-    uint32_t elapsed = 0;
-    const uint32_t poll_interval = 50;  // ms
-
-    while (elapsed < timeout_ms) {
-        // 更新位置同时检查状态
-        update_all_positions(200);  // 内部已包含更新
-
-        bool all_idle = true;
+    TickType_t start_ticks = xTaskGetTickCount();
+    const uint32_t poll_interval = 5;  // 快速轮询（仅读状态，无串口操作）
+    while (1) {
+        uint32_t elapsed = (uint32_t)((xTaskGetTickCount() - start_ticks)
+                                      * portTICK_PERIOD_MS);
+        // ---- 检查状态（由 9F 回调或上次容差检测设置）----
         step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+        bool all_idle = true;
         for (int i = 0; i < 3; i++) {
             if (step_motor_get_state(motors[i]) != STEP_MOTOR_IDLE) {
                 all_idle = false;
                 break;
             }
         }
-
         if (all_idle) {
-            ESP_LOGI(TAG, "All motors reached target");
+            ESP_LOGI(TAG, "All motors reached target (elapsed=%lums)", elapsed);
             return ESP_OK;
         }
-
+        // ---- 仅在接近超时时做一次兜底读取（容忍可能的 9F 丢失）----
+        if (elapsed >= timeout_ms - 200 && elapsed < timeout_ms - 150) {
+            ESP_LOGD(TAG, "Fallback: reading positions near timeout");
+            update_all_positions(80);  // 利用 Prf_TF + 容差做最后兜底
+        }
+        // ---- 超时判断 ----
+        if (elapsed >= timeout_ms) {
+            // 最后尝试一次位置更新
+            update_all_positions(50);
+            // 重新检查
+            all_idle = true;
+            for (int i = 0; i < 3; i++) {
+                if (step_motor_get_state(motors[i]) != STEP_MOTOR_IDLE) {
+                    all_idle = false;
+                    // 打印卡死电机信息
+                    ESP_LOGW(TAG, "Motor %d stuck: state=%d, pos=%lu, target=%lu",
+                             i + 1,
+                             (int)step_motor_get_state(motors[i]),
+                             step_motor_get_current_pos(motors[i]),
+                             step_motor_get_target_pos(motors[i]));
+                }
+            }
+            if (all_idle) {
+                ESP_LOGI(TAG, "All motors reached target (last resort)");
+                return ESP_OK;
+            }
+            ESP_LOGW(TAG, "Timeout waiting for motors (elapsed=%lums)", elapsed);
+            return ESP_ERR_TIMEOUT;
+        }
         vTaskDelay(pdMS_TO_TICKS(poll_interval));
-        elapsed += poll_interval;
     }
-
-    ESP_LOGW(TAG, "Timeout waiting for motors to reach target");
-    return ESP_ERR_TIMEOUT;
 }
 
 
@@ -199,17 +232,18 @@ esp_err_t move_wait_all_reached(uint32_t timeout_ms)
 
 
 void delta_test_move(void) {
-    delta_go_to(1.0f,0.0f,-240.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    delta_go_to(-150.0f,-150.0f,-240.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    delta_go_to(150.0f,-150.0f,-240.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    delta_go_to(150.0f,150.0f,-240.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    delta_go_to(-150.0f,150.0f,-240.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    delta_go_to(1.0f,0.0f,-240.0f);
+    float move_target = 80.0f;
+    float move_z = -210.0f;
+    uint32_t speed = 10;
+    uint8_t accel = 50;
+    uint32_t timeout_ms = 3000;
+    delta_go_to(1.0f,0.0f,-240.0f, speed, accel, timeout_ms);
+    delta_go_to(-move_target,-move_target,move_z, speed, accel, timeout_ms);
+    delta_go_to(move_target,-move_target,move_z, speed, accel, timeout_ms);
+    delta_go_to(move_target,move_target,move_z, speed, accel, timeout_ms);
+    delta_go_to(-move_target,move_target,move_z, speed, accel, timeout_ms);
+    delta_go_to(-move_target,-move_target,move_z, speed, accel, timeout_ms);
+    delta_go_to(1.0f,0.0f,-240.0f, speed, accel, timeout_ms);
     vTaskDelay(pdMS_TO_TICKS(3000));
     step_motor_handle_t motors[3] = {motor1, motor2, motor3};
     motor_to_homing(motors, STEP_MOTOR_HOME_NEAREST, 1000);
@@ -249,14 +283,34 @@ void move_fb_test(void) {
     }
 }
 
+
+void motor_angle_test(void) {
+
+    move_abs(30, 30, 30, 30, 50, 1000);
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+}
+
 void motor_move_test(void) {
-    // 发送同步位置命令
-    // step_motor_move_to(motor1, 1, 50, 50, 100, 1, 1, 1000);
-    // step_motor_move_to(motor2, 1, 50, 50, 100, 1, 1, 1000);
-    // step_motor_move_to(motor3, 1, 50, 50, 100, 1, 1, 1000);
-    //
-    // step_motor_global_sync_trigger(fb, 1000);
-    //move_abs(30.0f, 30.0f, 30.0f, 50, 50, 1000);
-    move_abs(-11.25f, -11.25f, -11.25f, 50, 50, 1000);
+    float move_target = 90.0f;
+    uint32_t speed = 10;
+    uint8_t accel = 50;
+    uint32_t timeout_ms = 2500;
+    delta_go_to(1.0f,0.0f,-240.0f, speed, accel, timeout_ms);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    delta_go_to(-move_target,-move_target,-240.0f, speed, accel, timeout_ms);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    delta_go_to(move_target,-move_target,-240.0f, speed, accel, timeout_ms);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    delta_go_to(move_target,move_target,-240.0f, speed, accel, timeout_ms);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    delta_go_to(-move_target,move_target,-240.0f, speed, accel, timeout_ms);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    delta_go_to(-move_target,-move_target,-240.0f, speed, accel, timeout_ms);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    delta_go_to(1.0f,0.0f,-240.0f, speed, accel, timeout_ms);
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+    motor_to_homing(motors, STEP_MOTOR_HOME_NEAREST, 1000);
 }
 

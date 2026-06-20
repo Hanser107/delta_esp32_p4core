@@ -186,41 +186,61 @@ esp_err_t step_motor_move_to(step_motor_handle_t handle,
     return ESP_OK;
 }
 
+// 在 step_motor.c 顶部添加容差常量
+#define POS_TOLERANCE_ENCODER  600   // ~1.65° 电机角度，作为 Prf_TF 不可靠时的回退
+
 esp_err_t step_motor_update_position(step_motor_handle_t handle,
                                      uint32_t timeout_ms)
 {
     if (!handle) return ESP_ERR_INVALID_ARG;
 
-    // 发送读取 0x36 命令，返回 5 字节数据：position(4) + status(1)
-    uint8_t data[5];
+    // ---- 1. 读取 0x36：实时位置 ----
+    uint8_t pos_data[5];
     uint8_t data_len;
     esp_err_t ret = motor_read_register(handle->fb, handle->addr,
-                                        0x36, data, &data_len, timeout_ms);
+                                        0x36, pos_data, &data_len, timeout_ms);
     if (ret != ESP_OK) return ret;
-
     if (data_len < 5) return ESP_ERR_INVALID_RESPONSE;
 
-    //uint8_t status_flag = data[0];   // 状态标志，Emm V5 中 0x02 表示到位
-    // 位置：4 字节
-    uint32_t pos = (uint32_t)(((uint32_t)data[1] << 24) |
-                            ((uint32_t)data[2] << 16) |
-                            ((uint32_t)data[3] << 8)  |
-                            ((uint32_t)data[4]));
+    uint32_t pos = ((uint32_t)pos_data[1] << 24) |
+                   ((uint32_t)pos_data[2] << 16) |
+                   ((uint32_t)pos_data[3] << 8)  |
+                   ((uint32_t)pos_data[4]);
 
+    // ---- 2. 读取 0x3A：电机状态标志 ----
+    uint8_t status_byte;
+    uint8_t status_len;
+    esp_err_t ret2 = motor_read_register(handle->fb, handle->addr,
+                                         0x3A, &status_byte, &status_len,
+                                         timeout_ms);
 
     xSemaphoreTake(handle->mutex, portMAX_DELAY);
     handle->current_pos = pos;
 
-    // 自动清除运动标志：如果运行中且状态为到位
+    // ---- 3. 状态判断（双重条件） ----
     if (handle->state == STEP_MOTOR_RUNNING) {
-        handle->state = STEP_MOTOR_IDLE;
-        ESP_LOGI(TAG, "Motor 0x%02X reached position %ld", handle->addr, pos);
+    bool reached = false;
+    // 条件A：Prf_TF 置位
+    if (ret2 == ESP_OK && (status_byte & 0x02)) {
+        reached = true;
     }
+    // 条件B：位置容差回退
+    uint32_t target_enc = (uint32_t)((uint64_t)handle->target_pos * 65536ULL / 3200ULL);
+    int32_t diff = (int32_t)pos - (int32_t)target_enc;
+    if (diff < 0) diff = -diff;
+    if ((uint32_t)diff <= POS_TOLERANCE_ENCODER) {
+        reached = true;
+    }
+    if (reached) {
+        handle->state = STEP_MOTOR_IDLE;
+        ESP_LOGI(TAG, "Motor 0x%02X reached position %lu (target=%lu enc)",
+                 handle->addr, pos, target_enc);
+    }
+}
     xSemaphoreGive(handle->mutex);
 
     return ESP_OK;
 }
-
 esp_err_t step_motor_notify_sync_started(step_motor_handle_t handle)
 {
     if (!handle) return ESP_ERR_INVALID_ARG;
@@ -302,4 +322,20 @@ esp_err_t step_motor_homing(step_motor_handle_t handle, uint8_t o_mode,
         ret = ESP_ERR_INVALID_RESPONSE;
     }
     return ret;
+}
+
+/**
+ * @brief 强制将电机状态设为 IDLE（由 9F 回调调用）
+ */
+esp_err_t step_motor_force_idle(step_motor_handle_t handle)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(handle->mutex, portMAX_DELAY);
+    if (handle->state != STEP_MOTOR_IDLE) {
+        ESP_LOGI(TAG, "Motor 0x%02X force IDLE (was state=%d)",
+                 handle->addr, (int)handle->state);
+        handle->state = STEP_MOTOR_IDLE;
+    }
+    xSemaphoreGive(handle->mutex);
+    return ESP_OK;
 }
