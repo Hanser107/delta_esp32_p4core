@@ -1,7 +1,7 @@
 # ============= components/gui_app/CMakeLists.txt =============
 
 # 设置组件依赖（LVGL 是必须的）
-set(REQUIRES lvgl)
+set(REQUIRES lvgl delta)
 
 # 收集所有源文件
 file(GLOB_RECURSE GUI_SOURCES
