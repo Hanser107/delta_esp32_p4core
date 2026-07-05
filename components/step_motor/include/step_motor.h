@@ -60,7 +60,53 @@ esp_err_t step_motor_set_enable(step_motor_handle_t handle,
  */
 esp_err_t step_motor_homing(step_motor_handle_t handle, uint8_t o_mode,
                                 uint32_t timeout_ms);
-
+/* ================================================================
+ *  回零状态结构体（对应手册 5.4.4 寄存器 0x3B）
+ * ================================================================ */
+typedef struct {
+    bool enc_ready;      // bit0: Enc_Rdy — 编码器就绪
+    bool cal_ready;      // bit1: Cal_Rdy — 校准表就绪
+    bool homing;         // bit2: Org_SF — 正在回零
+    bool homing_failed;  // bit3: Org_CF — 回零失败
+    bool otp_triggered;  // bit4: Otp_TF — 过热保护触发
+    bool ocp_triggered;  // bit5: Ocp_TF — 过流保护触发
+    uint8_t raw;         // 原始字节
+} step_motor_homing_status_t;
+/**
+ * @brief 读取回零状态标志（寄存器 0x3B）
+ */
+esp_err_t step_motor_read_homing_status(step_motor_handle_t handle,
+                                        step_motor_homing_status_t *status,
+                                        uint32_t timeout_ms);
+/**
+ * @brief 带到位检测的回零操作（阻塞式）
+ *
+ * 流程：
+ *   1. 发送触发回零命令（0x9A）
+ *   2. 轮询回零状态标志（0x3B）检测 Org_SF 归零
+ *   3. 结合 9F 回调双重确认
+ *
+ * @param handle     电机句柄
+ * @param o_mode     回零模式 0~4（见手册 5.4.2）
+ * @param timeout_ms 总超时（ms），建议 ≥10000
+ * @return ESP_OK 回零成功，ESP_ERR_TIMEOUT 超时，其他 失败
+ */
+esp_err_t step_motor_homing_with_detect(step_motor_handle_t handle,
+                                        uint8_t o_mode,
+                                        uint32_t timeout_ms);
+/**
+ * @brief 设定当前位置为单圈回零零点（寄存器 0x93 0x88）
+ *
+ * 对应手册 5.4.1，仅在单圈回零模式下有意义。
+ *
+ * @param handle     电机句柄
+ * @param store      是否存储到 EEPROM（掉电不丢失）
+ * @param timeout_ms 命令应答超时
+ * @return ESP_OK 零点设定成功
+ */
+esp_err_t step_motor_set_zero_position(step_motor_handle_t handle,
+                                       bool store,
+                                       uint32_t timeout_ms);
 /**
  * @brief 发送位置运动命令（相对/绝对）
  * @param handle      电机句柄

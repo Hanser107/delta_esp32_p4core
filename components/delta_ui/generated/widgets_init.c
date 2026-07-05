@@ -25,21 +25,16 @@ __attribute__((unused)) void kb_event_cb (lv_event_t *e) {
 __attribute__((unused)) void ta_event_cb (lv_event_t *e) {
 #if LV_USE_KEYBOARD
     lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t * ta = lv_event_get_target(e);
-    lv_obj_t * kb = lv_event_get_user_data(e);
+    lv_obj_t * ta = lv_event_get_target(e);          // 获取触发事件的文本区域
+    lv_obj_t * kb = lv_keyboard_get_textarea(ta);    // 获取与该文本区域关联的键盘
 
-    if(code == LV_EVENT_FOCUSED) {
-        if(lv_indev_get_type(lv_indev_active()) != LV_INDEV_TYPE_KEYPAD) {
+    if(code == LV_EVENT_CLICKED || code == LV_EVENT_FOCUSED) {
+        /* 当文本区域被点击或获得焦点时，将键盘重新指向它 */
+        if(kb != NULL) {
             lv_keyboard_set_textarea(kb, ta);
-            lv_obj_remove_flag(kb, LV_OBJ_FLAG_HIDDEN);
+            /* 可选：让键盘获得焦点，以便直接输入 */
+            // lv_group_focus_obj(kb);
         }
-    } else if(code == LV_EVENT_READY) {
-        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_state(ta, LV_STATE_FOCUSED);
-        lv_indev_reset(NULL, ta);
-    } else if(code == LV_EVENT_DEFOCUSED) {
-        lv_keyboard_set_textarea(kb, NULL);
-        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
     }
 #endif
 }

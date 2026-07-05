@@ -6,7 +6,7 @@
 #include "gpioled.h"
 #include "uart_comm.h"
 #include "motor_feedback.h"
-
+#include "app_task.h"
 
 extern gpio_led_t led1;
 extern uart_comm_handle_t uart;

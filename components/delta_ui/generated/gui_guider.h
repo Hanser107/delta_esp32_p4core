@@ -36,9 +36,24 @@ typedef struct
 	lv_obj_t *screen_go_move_btn_1_label;
 	lv_obj_t *screen_cancel_btn_1;
 	lv_obj_t *screen_cancel_btn_1_label;
+	lv_obj_t *screen_btn_DISABLE;
+	lv_obj_t *screen_btn_DISABLE_label;
+	lv_obj_t *screen_btn_ENABLE;
+	lv_obj_t *screen_btn_ENABLE_label;
+	lv_obj_t *screen_btn_SETZERO;
+	lv_obj_t *screen_btn_SETZERO_label;
+	lv_obj_t *screen_ddlist_MOTOR;
+	lv_obj_t *screen_ta_speed;
+	lv_obj_t *screen_ta_accel;
+	lv_obj_t *screen_ta_time;
+	lv_obj_t *screen_label_speedset;
+	lv_obj_t *screen_label_accset;
+	lv_obj_t *screen_label_timeoutset;
 	lv_obj_t *screen_mian_img;
 	lv_obj_t *screen_split_line;
 	lv_obj_t *screen_Delta_COORD;
+
+	lv_obj_t *g_kb_top_layer;
 }lv_ui;
 
 typedef void (*ui_setup_scr_t)(lv_ui * ui);
@@ -69,10 +84,9 @@ extern lv_ui guider_ui;
 void setup_scr_screen(lv_ui *ui);
 LV_IMAGE_DECLARE(_siying_RGB565A8_460x110);
 
-LV_FONT_DECLARE(lv_font_montserratMedium_9)
+LV_FONT_DECLARE(lv_font_montserratMedium_30)
 LV_FONT_DECLARE(lv_font_montserratMedium_12)
 LV_FONT_DECLARE(lv_font_montserratMedium_40)
-LV_FONT_DECLARE(lv_font_montserratMedium_30)
 LV_FONT_DECLARE(lv_font_montserratMedium_25)
 
 

@@ -2,14 +2,11 @@
 #include "step_motor.h"
 #include "esp_log.h"
 #include "delta.h"
+#include "bsp_init.h"
+#include "esp_timer.h"
 
 static const char *TAG = "move";
 
-/* ---- 全局变量（外部定义） ---- */
-extern step_motor_handle_t motor1;
-extern step_motor_handle_t motor2;
-extern step_motor_handle_t motor3;
-extern motor_feedback_handle_t fb;
 /* ---- 常量 ---- */
 #define PULSES_PER_REV     3200.0f    // 16 细分：3200 脉冲/圈
 #define DEG_PER_REV         360.0f    // 一圈 360°
@@ -24,7 +21,7 @@ extern motor_feedback_handle_t fb;
 static float last_target_angle[3] = {0, 0, 0};
 
 /** 输入角度钳位 钳位角度到 [-20, 90] */
-static inline float clamp_angle(float angle)
+float clamp_angle(float angle)
 {
     if (angle < ANGLE_MIN) {
         ESP_LOGW(TAG, "Angle clamped to %f", ANGLE_MIN);
@@ -80,44 +77,185 @@ static esp_err_t motor_to_homing(step_motor_handle_t motors[3], uint8_t homing_m
     return ESP_OK;
 }
 
+esp_err_t move_homing_all(uint8_t homing_mode, uint32_t timeout_ms)
+{
+    step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+    ESP_LOGI(TAG, "Starting homing all motors (mode=%d)...", homing_mode);
+    for (int i = 0; i < 3; i++) {
+        ESP_LOGI(TAG, "Homing motor %d...", i + 1);
+        esp_err_t ret = step_motor_homing(motors[i],
+                                                      homing_mode,
+                                                      timeout_ms);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Motor %d homing failed: 0x%x", i + 1, ret);
+            return ret;
+        }
+        // 电机间短暂间隔，避免总线冲突
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    // 回零完成后更新位置基准
+    update_all_positions(500);
+    last_target_angle[0] = pulses_to_angle(step_motor_get_current_pos(motor1));
+    last_target_angle[1] = pulses_to_angle(step_motor_get_current_pos(motor2));
+    last_target_angle[2] = pulses_to_angle(step_motor_get_current_pos(motor3));
+    ESP_LOGI(TAG, "Homing complete. Current angles: %.2f°, %.2f°, %.2f°",
+             last_target_angle[0], last_target_angle[1], last_target_angle[2]);
+    return ESP_OK;
+}
 
-static esp_err_t motor_abs_to_move(int32_t target_pulses[3], uint16_t speed, uint8_t accel, uint32_t timeout_ms) {
+esp_err_t move_enable_motor(uint8_t motor_id, uint32_t timeout_ms)
+{
+    step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+    step_motor_handle_t motor = motors[motor_id - 1];
+    // ✅ 等待电机空闲
+    uint32_t start = esp_timer_get_time() / 1000;
+    while (step_motor_get_state(motor) != STEP_MOTOR_IDLE) {
+        if ((esp_timer_get_time() / 1000 - start) > timeout_ms) {
+            ESP_LOGE(TAG, "Motor %d busy, cannot enable", motor_id);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    // ✅ 如果已经使能，跳过无谓命令
+    if (step_motor_is_enabled(motor)) {
+        ESP_LOGI(TAG, "motor(%d) already enabled", motor_id);
+        return ESP_OK;
+    }
+    esp_err_t ret = step_motor_set_enable(motor, true, timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Motor %d enable failed: 0x%x", motor_id, ret);   // 日志修正
+        return ret;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_LOGI(TAG, "motor(%d) enabled", motor_id);                       // 日志修正
+    return ESP_OK;
+}
+
+esp_err_t move_disable_motor(uint8_t motor_id, uint32_t timeout_ms)
+{
+    step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+    step_motor_handle_t motor = motors[motor_id - 1];
+    uint32_t start = esp_timer_get_time() / 1000;
+    while (step_motor_get_state(motor) != STEP_MOTOR_IDLE) {
+        if ((esp_timer_get_time() / 1000 - start) > timeout_ms) {
+            ESP_LOGE(TAG, "Motor %d busy, cannot disable", motor_id);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!step_motor_is_enabled(motor)) {
+        ESP_LOGI(TAG, "motor(%d) already disabled", motor_id);
+        return ESP_OK;
+    }
+    esp_err_t ret = step_motor_set_enable(motor, false, timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Motor %d disable failed: 0x%x", motor_id, ret);
+        return ret;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_LOGI(TAG, "motor(%d) disabled (free to move)", motor_id);
+    return ESP_OK;
+}
+
+esp_err_t move_set_zero_position(uint8_t motor_id, uint32_t timeout_ms) {
+    step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+    // 1. 确保电机使能
+    esp_err_t ret = move_enable_motor(motor_id, timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Enable motors before set zero failed");
+        return ret;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+    //发送零点设定命令
+
+    ret = step_motor_set_zero_position(motors[motor_id - 1], true, timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Motor %d set zero failed: 0x%x", motor_id, ret);
+        return ret;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // 3. 更新位置基准
+    update_all_positions(500);
+    last_target_angle[0] = 0.0f;
+    last_target_angle[1] = 0.0f;
+    last_target_angle[2] = 0.0f;
+    ESP_LOGI(TAG, "Zero position set for  motor %d (stored to EEPROM)", motor_id);
+    return ESP_OK;
+}
+
+static esp_err_t motor_abs_to_move(int32_t target_pulses[3],
+                                   uint16_t speed, uint8_t accel,
+                                   uint32_t timeout_ms)
+{
     int32_t pulses[3] = {0};
     uint8_t dir = 0;
     step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+
+    /* ---- 0. 使能检查 ---- */
     for (int i = 0; i < 3; i++) {
         if (!step_motor_is_enabled(motors[i])) {
             ESP_LOGE(TAG, "Motor %d not enabled", i+1);
             return ESP_ERR_INVALID_STATE;
         }
     }
+
+    /* ---- 等待所有电机退出 RUNNING ---- */
+    for (int attempt = 0; attempt < 15; attempt++) {
+        bool all_ready = true;
+        for (int i = 0; i < 3; i++) {
+            step_motor_state_t st = step_motor_get_state(motors[i]);
+            if (st == STEP_MOTOR_RUNNING) {
+                all_ready = false;
+                break;
+            }
+        }
+        if (all_ready) break;
+
+        // 位置轮询任务可能在此时把电机拉回 IDLE
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    /* ---- 最终确认（超过 300ms 仍未就绪则放弃，不污染任何电机）---- */
+    for (int i = 0; i < 3; i++) {
+        step_motor_state_t st = step_motor_get_state(motors[i]);
+        if (st == STEP_MOTOR_RUNNING) {
+            ESP_LOGE(TAG, "Motor %d still RUNNING, abort ALL to avoid pollution", i + 1);
+            return ESP_ERR_INVALID_STATE;   //此时没有任何电机被修改
+        }
+    }
+
+    /* ---- 原子发送（此时所有电机已确认就绪）---- */
     for (int i = 0; i < 3; i++) {
         dir = target_pulses[i] < 0 ? 1 : 0;
         pulses[i] = abs(target_pulses[i]);
+
         esp_err_t ret = step_motor_move_to(motors[i],
-                                           dir,
-                                           speed, accel,
+                                           dir, speed, accel,
                                            pulses[i],
                                            1,            // 绝对运动
-                                           1,
+                                           1,            // 同步等待
                                            timeout_ms);
-        ESP_LOGI(TAG, "Motor CMD MOVE: dir:%d, pulses:%ld", dir, pulses[i]);
+        ESP_LOGI(TAG, "Motor %d CMD MOVE: dir=%d, pulses=%ld", i + 1, dir, pulses[i]);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Motor %d cmd failed: %x", i+1, ret);
+            ESP_LOGE(TAG, "Motor %d cmd failed: 0x%x", i + 1, ret);
+            // 理论上不应该走到这里（已预检），但仍做防护
             return ret;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+
     vTaskDelay(pdMS_TO_TICKS(50));
     step_motor_global_sync_trigger(fb, timeout_ms);
     for (int i = 0; i < 3; i++) {
         esp_err_t ret = step_motor_notify_sync_started(motors[i]);
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Motor %d sync start notify failed", i+1);
+            ESP_LOGW(TAG, "Motor %d sync start notify failed", i + 1);
         }
     }
     return ESP_OK;
 }
+
 /* ---------- 公共 API ---------- */
 esp_err_t move_init(void)
 {
@@ -166,6 +304,7 @@ esp_err_t move_abs(float a1, float a2, float a3, uint16_t speed, uint8_t accel, 
     esp_err_t ret = motor_abs_to_move(delta_pulse, speed, accel, timeout_ms);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Move_abs fail, ERROR:%x", ret);
+        return ret;
     }
     last_target_angle[0] = a1;
     last_target_angle[1] = a2;
@@ -173,6 +312,60 @@ esp_err_t move_abs(float a1, float a2, float a3, uint16_t speed, uint8_t accel, 
     return ESP_OK;
 }
 
+/**
+ * @brief 非阻塞投递运动命令到执行器队列
+ * @return ESP_OK 投递成功，ESP_ERR_INVALID_STATE 队列满
+ */
+esp_err_t move_abs_async(float a1, float a2, float a3,
+                         uint16_t speed, uint8_t accel, uint32_t timeout_ms)
+{
+    if (!g_move_queue) return ESP_ERR_INVALID_STATE;
+
+    move_cmd_t cmd = {
+        .type = MOVE_CMD_NORMAL,
+        .theta1 = clamp_angle(a1),
+        .theta2 = clamp_angle(a2),
+        .theta3 = clamp_angle(a3),
+        .speed = speed,
+        .accel = accel,
+        .timeout_ms = timeout_ms,
+    };
+
+    if (xQueueSend(g_move_queue, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Move queue full, dropping command");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+/**
+ * @brief 事件驱动的等待所有电机到位（替代原 move_wait_all_reached）
+ */
+esp_err_t move_wait_all_reached_evt(uint32_t timeout_ms)
+{
+    EventBits_t bits = xEventGroupWaitBits(
+        g_motor_done_events,
+        ALL_MOTORS_DONE,
+        pdTRUE,                       // 到位后清除
+        pdTRUE,                       // 等待全部
+        pdMS_TO_TICKS(timeout_ms)
+    );
+
+    if ((bits & ALL_MOTORS_DONE) == ALL_MOTORS_DONE) {
+        return ESP_OK;
+    }
+
+    // 超时兜底
+    ESP_LOGW(TAG, "Wait timeout, force recovery");
+    update_all_positions(50);
+    step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+    for (int i = 0; i < 3; i++) {
+        if (step_motor_get_state(motors[i]) != STEP_MOTOR_IDLE) {
+            step_motor_force_idle(motors[i]);
+        }
+    }
+    return ESP_ERR_TIMEOUT;
+}
 
 esp_err_t move_wait_all_reached(uint32_t timeout_ms)
 {

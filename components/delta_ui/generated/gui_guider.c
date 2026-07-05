@@ -96,5 +96,6 @@ void video_play(lv_ui *ui)
 
 void init_keyboard(lv_ui *ui)
 {
-
+    /* 确保 g_kb_top_layer 指向一个有效的父对象 */
+    ui->g_kb_top_layer = lv_screen_active();
 }

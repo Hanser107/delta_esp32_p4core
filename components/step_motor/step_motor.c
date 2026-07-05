@@ -2,8 +2,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
+#include "esp_timer.h"
+
 
 static const char *TAG = "step_motor";
+
+#define STUCK_TIMEOUT_MS       5000
 
 struct step_motor {
     motor_feedback_handle_t fb;      // 底层通信句柄
@@ -15,6 +19,7 @@ struct step_motor {
     uint32_t                current_pos;   // 实际位置
     uint32_t                target_pos;    // 目标位置
     step_motor_state_t     state;         // IDLE / RUNNING / SYNC_WAITING
+    uint32_t               running_since_ms;
 };
 
 /* ========== 内部辅助：构建并发送位置命令 ========== */
@@ -96,10 +101,12 @@ esp_err_t step_motor_set_enable(step_motor_handle_t handle,
     if (!handle) return ESP_ERR_INVALID_ARG;
 
     // 使能/失能命令帧
-    uint8_t cmd[4] = {
+    uint8_t cmd[6] = {
         handle->addr,
         0xF3,
-        enable ? 0x00 : 0x01,
+        0xAB,
+        enable ? 0x01 : 0x00,
+        0x00,
         0x6B
     };
 
@@ -143,16 +150,69 @@ esp_err_t step_motor_move_to(step_motor_handle_t handle,
     }
 
     // 运动中不允许新命令（除非处于同步等待且新命令也是同步等待）
+    // 在 step_motor_move_to() 中替换原来 RUNNING 检查代码块
+
     if (handle->state == STEP_MOTOR_RUNNING) {
-        ESP_LOGW(TAG, "Motor 0x%02X already running", handle->addr);
-        xSemaphoreGive(handle->mutex);
-        return ESP_ERR_INVALID_STATE;
+        uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        uint32_t running_duration = now - handle->running_since_ms;
+
+        if (running_duration > 5000) {
+            /* 情况 A：超过 5 秒，认定为卡死，强制恢复 */
+            ESP_LOGW(TAG, "Motor 0x%02X stuck %lums, force IDLE and accept new cmd",
+                     handle->addr, running_duration);
+            handle->state = STEP_MOTOR_IDLE;
+            handle->running_since_ms = 0;
+            // 放行：继续执行下面的命令发送逻辑
+
+        } else if (running_duration > 2000) {
+            /* 情况 B：运行 2~5 秒，可能是电机快到位了，短暂等待 */
+            ESP_LOGW(TAG, "Motor 0x%02X running %lums, waiting 150ms...",
+                     handle->addr, running_duration);
+            xSemaphoreGive(handle->mutex);
+            vTaskDelay(pdMS_TO_TICKS(150));   // 给电机 150ms 完成运动
+            xSemaphoreTake(handle->mutex, portMAX_DELAY);
+
+            if (handle->state == STEP_MOTOR_RUNNING) {
+                ESP_LOGW(TAG, "Motor 0x%02X still running after wait, force IDLE",
+                         handle->addr);
+                handle->state = STEP_MOTOR_IDLE;
+                handle->running_since_ms = 0;
+                // 放行
+            }
+            // 如果期间被位置轮询任务设为 IDLE 了，直接放行
+
+        } else {
+            /* 情况 C：运行不足 2 秒，正常拒绝 */
+            ESP_LOGW(TAG, "Motor 0x%02X already running (%lums), rejected",
+                     handle->addr, running_duration);
+            xSemaphoreGive(handle->mutex);
+            return ESP_ERR_INVALID_STATE;
+        }
     }
-    if (handle->state == STEP_MOTOR_SYNC_WAITING && !sync) {
-        ESP_LOGW(TAG, "Motor 0x%02X waiting for sync, cannot accept immediate move",
-                 handle->addr);
-        xSemaphoreGive(handle->mutex);
-        return ESP_ERR_INVALID_STATE;
+    if (handle->state == STEP_MOTOR_SYNC_WAITING) {
+        if (!sync) {
+            ESP_LOGW(TAG, "Motor 0x%02X waiting for sync, cannot accept immediate move",
+                     handle->addr);
+            xSemaphoreGive(handle->mutex);
+            return ESP_ERR_INVALID_STATE;
+        }
+        // sync=1 的新命令覆盖旧的 SYNC_WAITING：允许，电机驱动器会用新参数
+        // 但先检查是否卡在 SYNC_WAITING 太久
+        uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        if (now - handle->running_since_ms > 10000) {
+            ESP_LOGW(TAG, "Motor 0x%02X stuck in SYNC_WAITING >10s, force IDLE",
+                     handle->addr);
+            handle->state = STEP_MOTOR_IDLE;
+            handle->running_since_ms = 0;
+        }
+        // 放行：覆盖旧的 sync 命令
+    }
+
+    if (sync) {
+        handle->state = STEP_MOTOR_SYNC_WAITING;
+    } else {
+        handle->state = STEP_MOTOR_RUNNING;
+        handle->running_since_ms = (uint32_t)(esp_timer_get_time() / 1000);
     }
 
     // 2. 计算目标绝对位置
@@ -187,7 +247,7 @@ esp_err_t step_motor_move_to(step_motor_handle_t handle,
 }
 
 // 在 step_motor.c 顶部添加容差常量
-#define POS_TOLERANCE_ENCODER  600   // ~1.65° 电机角度，作为 Prf_TF 不可靠时的回退
+#define POS_TOLERANCE_ENCODER  300   // ~1.65° 电机角度，作为 Prf_TF 不可靠时的回退
 
 esp_err_t step_motor_update_position(step_motor_handle_t handle,
                                      uint32_t timeout_ms)
@@ -218,6 +278,15 @@ esp_err_t step_motor_update_position(step_motor_handle_t handle,
     handle->current_pos = pos;
 
     // ---- 3. 状态判断（双重条件） ----
+    // 在 step_motor_update_position 的状态判断区域增加：
+    if (handle->state == STEP_MOTOR_SYNC_WAITING) {
+        uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        if (now - handle->running_since_ms > 3000) {
+            ESP_LOGW(TAG, "Motor 0x%02X stuck in SYNC_WAITING, force IDLE",
+                     handle->addr);
+            handle->state = STEP_MOTOR_IDLE;
+        }
+    }
     if (handle->state == STEP_MOTOR_RUNNING) {
     bool reached = false;
     // 条件A：Prf_TF 置位
@@ -248,6 +317,7 @@ esp_err_t step_motor_notify_sync_started(step_motor_handle_t handle)
     xSemaphoreTake(handle->mutex, portMAX_DELAY);
     if (handle->state == STEP_MOTOR_SYNC_WAITING) {
         handle->state = STEP_MOTOR_RUNNING;
+        handle->running_since_ms = (uint32_t)(esp_timer_get_time() / 1000);
     }
     xSemaphoreGive(handle->mutex);
     return ESP_OK;
@@ -324,6 +394,155 @@ esp_err_t step_motor_homing(step_motor_handle_t handle, uint8_t o_mode,
     return ret;
 }
 
+esp_err_t step_motor_read_homing_status(step_motor_handle_t handle,
+                                        step_motor_homing_status_t *status,
+                                        uint32_t timeout_ms)
+{
+    if (!handle || !status) return ESP_ERR_INVALID_ARG;
+    uint8_t data;
+    uint8_t data_len;
+    esp_err_t ret = motor_read_register(handle->fb, handle->addr,
+                                        0x3B, &data, &data_len, timeout_ms);
+    if (ret != ESP_OK) return ret;
+    if (data_len < 1) return ESP_ERR_INVALID_RESPONSE;
+    memset(status, 0, sizeof(*status));
+    status->raw = data;
+    status->enc_ready      = (data & 0x01) != 0;   // bit0
+    status->cal_ready      = (data & 0x02) != 0;   // bit1
+    status->homing         = (data & 0x04) != 0;   // bit2: Org_SF
+    status->homing_failed  = (data & 0x08) != 0;   // bit3: Org_CF
+    status->otp_triggered  = (data & 0x10) != 0;   // bit4
+    status->ocp_triggered  = (data & 0x20) != 0;   // bit5
+    return ESP_OK;
+}
+// ========== 新增：带到位检测的回零 ==========
+esp_err_t step_motor_homing_with_detect(step_motor_handle_t handle,
+                                        uint8_t o_mode,
+                                        uint32_t timeout_ms)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+    if (o_mode > 5) return ESP_ERR_INVALID_ARG;
+    // 1. 确保电机使能
+    if (!step_motor_is_enabled(handle)) {
+        ESP_LOGW(TAG, "Motor 0x%02X not enabled, enabling for homing", handle->addr);
+        esp_err_t ret = step_motor_set_enable(handle, true, 1000);
+        if (ret != ESP_OK) return ret;
+    }
+    // 2. 发送触发回零命令
+    uint8_t cmd[5] = { handle->addr, 0x9A, o_mode, 0x00, 0x6B };
+    motor_response_t resp;
+    esp_err_t ret = motor_feedback_send_and_wait(handle->fb, cmd, sizeof(cmd),
+                                                 &resp, timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Motor 0x%02X homing cmd send failed: 0x%x", handle->addr, ret);
+        return ret;
+    }
+    // 3. 检查即时响应
+    if (resp.status == MOTOR_STATUS_AT_ZERO) {  // 0x12: 已在零点
+        ESP_LOGI(TAG, "Motor 0x%02X already at zero position", handle->addr);
+        // 更新本地状态
+        xSemaphoreTake(handle->mutex, portMAX_DELAY);
+        handle->state = STEP_MOTOR_IDLE;
+        xSemaphoreGive(handle->mutex);
+        return ESP_OK;
+    }
+    if (resp.status != MOTOR_STATUS_OK) {       // 非 0x02
+        ESP_LOGE(TAG, "Motor 0x%02X homing rejected: status=0x%02X",
+                 handle->addr, resp.status);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    // 4. 设置本地状态为 RUNNING（位置轮询任务不会误判 IDLE）
+    xSemaphoreTake(handle->mutex, portMAX_DELAY);
+    handle->state = STEP_MOTOR_RUNNING;
+    handle->running_since_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    xSemaphoreGive(handle->mutex);
+    ESP_LOGI(TAG, "Motor 0x%02X homing started (mode=%d), waiting...",
+             handle->addr, o_mode);
+    // 5. 轮询等待回零完成
+    uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    const uint32_t poll_interval = 50;   // 50ms 轮询一次
+    while (1) {
+        uint32_t elapsed = (uint32_t)(esp_timer_get_time() / 1000) - start_ms;
+        // 5a. 检查本地状态（9F 回调可能已设为 IDLE）
+        step_motor_state_t st = step_motor_get_state(handle);
+        if (st == STEP_MOTOR_IDLE) {
+            ESP_LOGI(TAG, "Motor 0x%02X homing complete (9F callback)", handle->addr);
+            return ESP_OK;
+        }
+        // 5b. 读取回零状态标志（0x3B）
+        step_motor_homing_status_t hs;
+        if (step_motor_read_homing_status(handle, &hs, 50) == ESP_OK) {
+            if (!hs.homing) {  // Org_SF = 0，回零已结束
+                if (hs.homing_failed) {
+                    ESP_LOGE(TAG, "Motor 0x%02X homing FAILED", handle->addr);
+                    step_motor_force_idle(handle);
+                    return ESP_ERR_INVALID_STATE;
+                }
+                ESP_LOGI(TAG, "Motor 0x%02X homing success (status poll)", handle->addr);
+                step_motor_force_idle(handle);
+                return ESP_OK;
+            }
+        }
+        //5c. 超时检查
+        if (elapsed >= timeout_ms) {
+            ESP_LOGE(TAG, "Motor 0x%02X homing timeout (%lums)", handle->addr, elapsed);
+            //step_motor_abort_homing(handle, 200);   // 尝试中断
+            step_motor_force_idle(handle);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(poll_interval));
+    }
+}
+// ========== 新增：设定零点位置（0x93 0x88）==========
+esp_err_t step_motor_set_zero_position(step_motor_handle_t handle,
+                                       bool store,
+                                       uint32_t timeout_ms)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+    // 手册 5.4.1: Addr 0x93 0x88 store_flag 0x6B
+    uint8_t cmd[4] = {
+        handle->addr,
+        0x93,
+        0x88,
+        store ? 0x01 : 0x00
+    };
+    // 校验码
+    uint8_t full_cmd[5];
+    memcpy(full_cmd, cmd, 4);
+    full_cmd[4] = 0x6B;
+    motor_response_t resp;
+    esp_err_t ret = motor_feedback_send_and_wait(handle->fb, full_cmd, sizeof(full_cmd),
+                                                 &resp, timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Motor 0x%02X set zero cmd failed: 0x%x", handle->addr, ret);
+        return ret;
+    }
+    if (resp.status != MOTOR_STATUS_OK) {
+        ESP_LOGE(TAG, "Motor 0x%02X set zero rejected: status=0x%02X",
+                 handle->addr, resp.status);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    ESP_LOGI(TAG, "Motor 0x%02X zero position set (store=%d)", handle->addr, store);
+    return ESP_OK;
+}
+// ========== 新增：强制中断回零 ==========
+esp_err_t step_motor_abort_homing(step_motor_handle_t handle,
+                                  uint32_t timeout_ms)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+    uint8_t cmd[4] = { handle->addr, 0x9C, 0x48, 0x6B };
+    motor_response_t resp;
+    esp_err_t ret = motor_feedback_send_and_wait(handle->fb, cmd, sizeof(cmd),
+                                                 &resp, timeout_ms);
+    if (ret == ESP_OK || ret == ESP_ERR_TIMEOUT) {
+        // 中断命令可能无应答或超时，都视为成功
+        ESP_LOGI(TAG, "Motor 0x%02X homing abort sent", handle->addr);
+        step_motor_force_idle(handle);
+        return ESP_OK;
+    }
+    return ret;
+}
+
 /**
  * @brief 强制将电机状态设为 IDLE（由 9F 回调调用）
  */
@@ -332,9 +551,11 @@ esp_err_t step_motor_force_idle(step_motor_handle_t handle)
     if (!handle) return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(handle->mutex, portMAX_DELAY);
     if (handle->state != STEP_MOTOR_IDLE) {
-        ESP_LOGI(TAG, "Motor 0x%02X force IDLE (was state=%d)",
-                 handle->addr, (int)handle->state);
+        uint32_t running_ms = (uint32_t)(esp_timer_get_time() / 1000) - handle->running_since_ms;
+        ESP_LOGI(TAG, "Motor 0x%02X force IDLE (was state=%d, running=%lums)",
+                 handle->addr, (int)handle->state, running_ms);
         handle->state = STEP_MOTOR_IDLE;
+        handle->running_since_ms = 0;   // ✅ 清零时间戳
     }
     xSemaphoreGive(handle->mutex);
     return ESP_OK;

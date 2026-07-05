@@ -2,6 +2,7 @@
 #include <math.h>
 #include "esp_log.h"
 #include "move.h"
+#include "app_task.h"
 
 static const char *TAG = "delta";
 
@@ -388,9 +389,10 @@ esp_err_t delta_move_linear(float x, float y, float z,
 }
 
 
+// delta.c 中修改 delta_go_to
 esp_err_t delta_go_to(float x, float y, float z,
-                            uint32_t speed, uint8_t accel,
-                            uint32_t timeout_ms)
+                      uint32_t speed, uint8_t accel,
+                      uint32_t timeout_ms)
 {
     delta_ik_result_t result = {0};
 
@@ -405,19 +407,58 @@ esp_err_t delta_go_to(float x, float y, float z,
     ESP_LOGI(TAG, "IK: θ1=%.2f° θ2=%.2f° θ3=%.2f°",
              result.theta1, result.theta2, result.theta3);
 
-    esp_err_t ret = move_abs(result.theta1, result.theta2, result.theta3,
+    // 发送同步运动命令（move_abs 已修复错误传递，失败不会更新坐标）
+    esp_err_t ret = move_abs_async(result.theta1, result.theta2, result.theta3,
                              speed, accel, timeout_ms);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "move_abs fail: %x", ret);
         return ret;
     }
 
-    ret = move_wait_all_reached(timeout_ms);
+    //改用事件驱动等待（零 CPU 占用，由位置轮询 + 9F 回调唤醒）
+    ret = move_wait_all_reached_evt(timeout_ms);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Wait timeout");
-        return ret;
+        ESP_LOGE(TAG, "Wait timeout (motor may be stuck, forced recovery)");
+    }
+    // 更新当前笛卡尔坐标
+    delta_coord.x_coord = x;
+    delta_coord.y_coord = y;
+    delta_coord.z_coord = z;
+    return ret;   // 返回实际等待结果
+}
+
+// delta.c 新增（需要在文件顶部包含 app_task.h）
+#include "app_task.h"
+
+esp_err_t delta_go_to_async(float x, float y, float z,
+                            uint32_t speed, uint8_t accel,
+                            uint32_t timeout_ms)
+{
+    delta_ik_result_t result = {0};
+    clamp_to_workspace(&x, &y, &z);
+
+    if (!Delta_CalculateIK(x, y, z, &result)) {
+        ESP_LOGE(TAG, "IK fail for async: (%.1f, %.1f, %.1f)", x, y, z);
+        return ESP_ERR_INVALID_ARG;
     }
 
+    move_cmd_t cmd = {
+        .theta1 = clamp_angle(result.theta1),
+        .theta2 = clamp_angle(result.theta2),
+        .theta3 = clamp_angle(result.theta3),
+        .speed = speed,
+        .accel = accel,
+        .timeout_ms = timeout_ms,
+    };
+
+    // 非阻塞投递，若队列满则等待最多 100ms（避免丢失点但又不卡死 UI）
+    if (xQueueSend(g_move_queue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGE(TAG, "Move queue full, dropping point (%.1f, %.1f, %.1f)", x, y, z);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 更新 UI 可能依赖的坐标记录（如果主界面需要显示）
+    // 注意：此时运动可能还未执行，显示的坐标是“目标坐标”
     delta_coord.x_coord = x;
     delta_coord.y_coord = y;
     delta_coord.z_coord = z;
@@ -425,4 +466,52 @@ esp_err_t delta_go_to(float x, float y, float z,
 }
 
 
+esp_err_t move_homing_all_async (uint32_t timeout_ms)
+{
+    if (!g_move_queue) return ESP_ERR_INVALID_STATE;
 
+    move_cmd_t cmd = {
+        .type = MOVE_CMD_HOMING,
+        .timeout_ms = timeout_ms,
+    };
+
+    if (xQueueSend(g_move_queue, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Move queue full, dropping command");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+esp_err_t move_set_enable_async(uint8_t motor_id, uint8_t enable_val, uint32_t timeout_ms)
+{
+    if (!g_move_queue) return ESP_ERR_INVALID_STATE;
+
+    move_cmd_t cmd = {
+        .type = MOVE_CMD_SET_ENABLE,
+        .set_enable_motor_id = motor_id,
+        .set_enable_val = enable_val,
+        .timeout_ms = timeout_ms,
+    };
+
+    if (xQueueSend(g_move_queue, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Move queue full, dropping command");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+esp_err_t move_set_zero_position_async(uint8_t motor_id, uint32_t timeout_ms) {
+    if (!g_move_queue) return ESP_ERR_INVALID_STATE;
+
+    move_cmd_t cmd = {
+        .type = MOVE_CMD_SET_ZERO,
+        .set_zero_motor_id = motor_id,
+        .timeout_ms = timeout_ms,
+    };
+
+    if (xQueueSend(g_move_queue, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Move queue full, dropping command");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
