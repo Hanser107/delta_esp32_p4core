@@ -25,7 +25,7 @@ static const char *TAG = "delta";
 #define DELTA_INIT_Z        (-124.9998f)
 
 /* 工作空间参数 */
-#define WORKSPACE_Z_MIN  (-444.26f)
+#define WORKSPACE_Z_MIN  (-340.26f)
 #define WORKSPACE_Z_MAX  (-77.10f)
 #define WORKSPACE_N_BINS 50
 #define WORKSPACE_DZ     (7.343306f)   /* (Z_MAX - Z_MIN) / N_BINS */
@@ -36,7 +36,7 @@ static const char *TAG = "delta";
 
 /* ---------------- 安全间距（单位 mm） ---------------- */
 #define WORKSPACE_SAFETY_MARGIN_Z      3.0f   // Z 轴上下内缩量（防止碰撞上下平台）
-#define WORKSPACE_SAFETY_MARGIN_R_MAX  30.0f   // 最大半径方向内缩量（远离外边界，防止关节拉到极限）
+#define WORKSPACE_SAFETY_MARGIN_R_MAX  38.0f   // 最大半径方向内缩量（远离外边界，防止关节拉到极限）
 #define WORKSPACE_SAFETY_MARGIN_R_MIN  3.0f   // 最小半径方向外扩量（远离中心空洞，防止连杆干涉）
 
 /* 球形工作空间参数 */
@@ -426,9 +426,6 @@ esp_err_t delta_go_to(float x, float y, float z,
     delta_coord.z_coord = z;
     return ret;   // 返回实际等待结果
 }
-
-// delta.c 新增（需要在文件顶部包含 app_task.h）
-#include "app_task.h"
 
 esp_err_t delta_go_to_async(float x, float y, float z,
                             uint32_t speed, uint8_t accel,

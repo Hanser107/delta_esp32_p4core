@@ -13,14 +13,17 @@
 #include "esp_err.h"
 #include "delta.h"
 
+/* DELTA运动速度参数 */
+#define WORK_SPEED      10             //运动速度
+#define WORK_ACCEL      10              //运动加速度
 
 /* -------------------- Delta workspace -------------------- */
-#define DELTA_X_MIN   (-200.0f)
-#define DELTA_X_MAX   200.0f
-#define DELTA_Y_MIN   (-200.0f)
-#define DELTA_Y_MAX   200.0f
-#define DELTA_Z_MIN   (-300.0f)
-#define DELTA_Z_MAX   0.0f
+#define DELTA_X_MIN   (-190.0f)
+#define DELTA_X_MAX   190.0f
+#define DELTA_Y_MIN   (-190.0f)
+#define DELTA_Y_MAX   190.0f
+#define DELTA_Z_MIN   (-280.0f)
+#define DELTA_Z_MAX   (-80.0f)
 
 #define SLIDER_SCALE  10
 
@@ -91,6 +94,7 @@ static void setting_ddlist_cb(lv_event_t *e);
 static void setting_enable_cb(lv_event_t *e);
 static void setting_disable_cb(lv_event_t *e);
 static void setting_setzero_cb(lv_event_t *e);
+static void setting_set_cb(lv_event_t *e);
 
 /* Keyboard */
 static void kb_event_handler(lv_event_t *e);
@@ -182,7 +186,7 @@ static void setting_ddlist_cb(lv_event_t *e)
     if (code == LV_EVENT_VALUE_CHANGED) {
         lv_obj_t *dd = lv_event_get_target(e);
         uint16_t sel = lv_dropdown_get_selected(dd);
-        g_selected_motor = (uint8_t)sel;   /* 0, 1, 2 */
+        g_selected_motor = (uint8_t)sel + 1;   /* 0, 1, 2 */
         ESP_LOGI("SETTING", "Motor selected: %d", g_selected_motor + 1);
     }
 }
@@ -193,7 +197,7 @@ static void setting_ddlist_cb(lv_event_t *e)
 static void setting_enable_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    ESP_LOGI("SETTING", "ENABLE motor %d", g_selected_motor + 1);
+    ESP_LOGI("SETTING", "ENABLE motor %d", g_selected_motor);
 
     /*
      * 调用 delta 驱动层的使能接口。
@@ -212,7 +216,7 @@ static void setting_enable_cb(lv_event_t *e)
 static void setting_disable_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    ESP_LOGI("SETTING", "DISABLE motor %d", g_selected_motor + 1);
+    ESP_LOGI("SETTING", "DISABLE motor %d", g_selected_motor);
 
     esp_err_t ret = move_set_enable_async(g_selected_motor, false, 300);
     if (ret != ESP_OK) {
@@ -226,7 +230,7 @@ static void setting_disable_cb(lv_event_t *e)
 static void setting_setzero_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    ESP_LOGI("SETTING", "SET ZERO for motor %d", g_selected_motor + 1);
+    ESP_LOGI("SETTING", "SET ZERO for motor %d", g_selected_motor);
 
     esp_err_t ret = move_set_zero_position_async(g_selected_motor, 300);
     if (ret != ESP_OK) {
@@ -440,6 +444,44 @@ void delta_ui_init(lv_ui *ui)
     lv_obj_add_flag(g_setting_ta_accel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(g_setting_ta_time,  LV_OBJ_FLAG_CLICKABLE);
 
+        /* ---- 按钮：ENABLE / DISABLE / SET ZERO ---- */
+    lv_obj_add_event_cb(ui->screen_btn_ENABLE,  setting_enable_cb,  LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(ui->screen_btn_DISABLE, setting_disable_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(ui->screen_btn_SETZERO, setting_setzero_cb, LV_EVENT_CLICKED, NULL);
+
+    /* ---- 文本输入框：点击弹出数字键盘 ---- */
+    g_setting_ta_speed = ui->screen_ta_speed;
+    g_setting_ta_accel = ui->screen_ta_accel;
+    g_setting_ta_time  = ui->screen_ta_time;
+
+    lv_obj_add_event_cb(g_setting_ta_speed, ta_focus_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(g_setting_ta_accel, ta_focus_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(g_setting_ta_time,  ta_focus_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_add_flag(g_setting_ta_speed, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(g_setting_ta_accel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(g_setting_ta_time,  LV_OBJ_FLAG_CLICKABLE);
+
+    /* ========== 新增 SET 按钮 ========== */
+    lv_obj_t *btn_set = lv_button_create(tab_setting);          // 使用 tab_setting 变量
+    lv_obj_set_pos(btn_set, 545, 300);                          // 位置可根据实际布局微调
+    lv_obj_set_size(btn_set, 200, 75);
+    lv_obj_set_style_bg_color(btn_set, lv_color_hex(0x4CAF50), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_grad_dir(btn_set, LV_GRAD_DIR_NONE,    LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(btn_set, 0,                  LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(btn_set, 10,                       LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(btn_set, 0,                  LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_obj_t *lbl_set = lv_label_create(btn_set);
+    lv_label_set_text(lbl_set, "SET");
+    lv_obj_center(lbl_set);
+    lv_obj_set_style_text_color(lbl_set, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(lbl_set, &lv_font_montserratMedium_30, 0);
+
+    lv_obj_add_event_cb(btn_set, setting_set_cb, LV_EVENT_CLICKED, NULL);
+    /* ===================================== */
+
+    ESP_LOGI("DELTA_UI", "SETTING tab initialized, keyboard ready on-demand");
     ESP_LOGI("DELTA_UI", "SETTING tab initialized, keyboard ready on-demand");
 }
 
@@ -653,12 +695,44 @@ static void traj_run_cb(lv_event_t *e)
     send_delta_command(dx, dy, g_target_z);
 }
 
+/**
+ * @brief SET 按钮回调：读取文本框内容并应用设置
+ */
+static void setting_set_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    ESP_LOGI("SETTING", "SET button pressed");
+
+    /* 从 textarea 读取当前值（字符串转数值） */
+    const char *speed_str = lv_textarea_get_text(g_setting_ta_speed);
+    const char *accel_str = lv_textarea_get_text(g_setting_ta_accel);
+    const char *time_str  = lv_textarea_get_text(g_setting_ta_time);
+
+    int speed_val = atoi(speed_str);
+    int accel_val = atoi(accel_str);
+    int time_val  = atoi(time_str);
+
+    /* 合法性检查（根据实际上下限调整） */
+    if (speed_val <= 0 || accel_val <= 0 || time_val <= 0) {
+        ESP_LOGW("SETTING", "Invalid parameter values");
+        return;
+    }
+
+    ESP_LOGI("SETTING", "Speed:%d Hz/s, Accel:%d Hz/s², Timeout:%d ms",
+             speed_val, accel_val, time_val);
+
+    /*
+     * 调用 delta 驱动层接口，将参数应用到当前选中的电机。
+     * 请根据实际 delta.h 中的接口实现替换下面伪代码。
+     */
+    // move_set_parameters(g_selected_motor, speed_val, accel_val, time_val);
+}
 /* ==================================================================
  *  Communication stub
  * ================================================================== */
 static void send_delta_command(float x, float y, float z)
 {
-    esp_err_t ret = delta_go_to_async(x, y, z, 10, 10, 1000);
+    esp_err_t ret = delta_go_to_async(x, y, z, WORK_SPEED, WORK_ACCEL, 1000);
     if (ret != ESP_OK) {
         ESP_LOGW("Delta Move", "Async move failed: %x", ret);
         return;

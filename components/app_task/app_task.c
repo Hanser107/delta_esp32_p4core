@@ -285,16 +285,16 @@ void task_create(void)
     configASSERT(ret == pdPASS);
 
     /* ---- LED 任务（可选）---- */
-    ret = xTaskCreatePinnedToCore(
-        led_task,
-        "led",
-        2048,
-        NULL,
-        3,
-        NULL,
-        1              // Core 1
-    );
-    configASSERT(ret == pdPASS);
+    // ret = xTaskCreatePinnedToCore(
+    //     led_task,
+    //     "led",
+    //     2048,
+    //     NULL,
+    //     3,
+    //     NULL,
+    //     1              // Core 1
+    // );
+    // configASSERT(ret == pdPASS);
 
     ESP_LOGI(TAG, "All tasks created successfully");
     ESP_LOGI(TAG, "  Core 0: [pos_poll:8] [motion_exec:10]");

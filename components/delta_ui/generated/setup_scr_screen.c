@@ -469,7 +469,7 @@ void setup_scr_screen(lv_ui *ui)
     ui->screen_ta_speed = lv_textarea_create(ui->screen_mian_tabview_tab_4);
     lv_obj_set_pos(ui->screen_ta_speed, 305, 190);
     lv_obj_set_size(ui->screen_ta_speed, 200, 70);
-    lv_textarea_set_text(ui->screen_ta_speed, "SPEED");
+    lv_textarea_set_text(ui->screen_ta_speed, "50");
     lv_textarea_set_placeholder_text(ui->screen_ta_speed, "");
     lv_textarea_set_password_bullet(ui->screen_ta_speed, "*");
     lv_textarea_set_password_mode(ui->screen_ta_speed, false);
@@ -507,7 +507,7 @@ void setup_scr_screen(lv_ui *ui)
     ui->screen_ta_accel = lv_textarea_create(ui->screen_mian_tabview_tab_4);
     lv_obj_set_pos(ui->screen_ta_accel, 305, 300);
     lv_obj_set_size(ui->screen_ta_accel, 200, 70);
-    lv_textarea_set_text(ui->screen_ta_accel, "ACCEL");
+    lv_textarea_set_text(ui->screen_ta_accel, "50");
     lv_textarea_set_placeholder_text(ui->screen_ta_accel, "");
     lv_textarea_set_password_bullet(ui->screen_ta_accel, "*");
     lv_textarea_set_password_mode(ui->screen_ta_accel, false);
@@ -545,7 +545,7 @@ void setup_scr_screen(lv_ui *ui)
     ui->screen_ta_time = lv_textarea_create(ui->screen_mian_tabview_tab_4);
     lv_obj_set_pos(ui->screen_ta_time, 795, 190);
     lv_obj_set_size(ui->screen_ta_time, 200, 70);
-    lv_textarea_set_text(ui->screen_ta_time, "TIME");
+    lv_textarea_set_text(ui->screen_ta_time, "100");
     lv_textarea_set_placeholder_text(ui->screen_ta_time, "");
     lv_textarea_set_password_bullet(ui->screen_ta_time, "*");
     lv_textarea_set_password_mode(ui->screen_ta_time, false);
@@ -583,7 +583,7 @@ void setup_scr_screen(lv_ui *ui)
     ui->screen_label_speedset = lv_label_create(ui->screen_mian_tabview_tab_4);
     lv_obj_set_pos(ui->screen_label_speedset, 20, 210);
     lv_obj_set_size(ui->screen_label_speedset, 260, 25);
-    lv_label_set_text(ui->screen_label_speedset, "DELTA_SPEED_SET");
+    lv_label_set_text(ui->screen_label_speedset, "SPEED_SET(Hz/s)");
     lv_label_set_long_mode(ui->screen_label_speedset, LV_LABEL_LONG_WRAP);
 
     //Write style for screen_label_speedset, Part: LV_PART_MAIN, State: LV_STATE_DEFAULT.
@@ -606,7 +606,7 @@ void setup_scr_screen(lv_ui *ui)
     ui->screen_label_accset = lv_label_create(ui->screen_mian_tabview_tab_4);
     lv_obj_set_pos(ui->screen_label_accset, 20, 335);
     lv_obj_set_size(ui->screen_label_accset, 260, 25);
-    lv_label_set_text(ui->screen_label_accset, "DELTA_ACCEL_SET");
+    lv_label_set_text(ui->screen_label_accset, "ACCEL_SET(Hz/s2)");
     lv_label_set_long_mode(ui->screen_label_accset, LV_LABEL_LONG_WRAP);
 
     //Write style for screen_label_accset, Part: LV_PART_MAIN, State: LV_STATE_DEFAULT.
@@ -629,7 +629,7 @@ void setup_scr_screen(lv_ui *ui)
     ui->screen_label_timeoutset = lv_label_create(ui->screen_mian_tabview_tab_4);
     lv_obj_set_pos(ui->screen_label_timeoutset, 520, 215);
     lv_obj_set_size(ui->screen_label_timeoutset, 260, 25);
-    lv_label_set_text(ui->screen_label_timeoutset, "DELTA_TIMEOUT");
+    lv_label_set_text(ui->screen_label_timeoutset, "TIMEOUT(ms)");
     lv_label_set_long_mode(ui->screen_label_timeoutset, LV_LABEL_LONG_WRAP);
 
     //Write style for screen_label_timeoutset, Part: LV_PART_MAIN, State: LV_STATE_DEFAULT.
