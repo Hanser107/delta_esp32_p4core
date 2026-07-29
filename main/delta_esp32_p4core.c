@@ -25,6 +25,7 @@ void app_main(void)
     ESP_LOGI(TAG, "BSP_INIT completed");
     /* WIFI 初始化 */
     WIFI_Init();
+
     ESP_LOGI(TAG, "WIFI_INIT completed");
     // esp_err_t err = mic_test_start();
     // if (err != ESP_OK) {
