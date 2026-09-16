@@ -1,5 +1,5 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-# Note: if you change the phy_init or app partition offset, make sure to change the offset in Kconfig.projbuild
+# 名称,     类型,  子类型,  偏移,    大小,   标志
+# 注意：若修改 phy_init 或 app 分区的偏移，需同步修改 Kconfig.projbuild 中的偏移量。
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
 factory,  app,  factory, ,        9M,

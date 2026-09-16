@@ -1,47 +1,51 @@
+/**
+ * @file delta.c
+ * @brief Delta 机器人笛卡尔空间接口的实现。
+ * @details 提供工作空间钳位与闭式逆运动学求解，并把求解结果经 move 组件
+ *          下发到三个轴；同时维护内部的笛卡尔参考位置。
+ */
+
 #include "delta.h"
 #include <math.h>
 #include "esp_log.h"
 #include "move.h"
-#include "app_task.h"
 
 static const char *TAG = "delta";
 
-/** Delta 机器人结构参数 (单位: mm) */
-#define DELTA_ROBOT_RADIUS_UPPER  81.8f   // Ru: 上平台等边三角形半径
-#define DELTA_ROBOT_RADIUS_LOWER  25.0f   // Rl: 下平台等边三角形半径
-#define DELTA_ROBOT_ARM_UPPER     185.0f  // L: 上臂(并联臂)长度
-#define DELTA_ROBOT_ARM_LOWER     270.0f  // La: 下臂(连杆)长度
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#define RAD_TO_DEG  (180.0f / (float)M_PI)
+#define SQRT3       1.73205080756887729f
 
-//安全运动坐标范围
-#define DELTA_MOVE_SAFE_MAX_X 200.0f
-#define DELTA_MOVE_SAFE_MIN_X (-200.0f)
-#define DELTA_MOVE_SAFE_MAX_Y 200.0f
-#define DELTA_MOVE_SAFE_MIN_Y (-200.0f)
-#define DELTA_MOVE_SAFE_MAX_Z (-100.0f)
-#define DELTA_MOVE_SAFE_MIN_Z (-400.0f)
+/* ------------------------------------------------------- 机械结构几何参数（mm） */
+/** @brief Ru：固定平台三角形半径。 */
+#define DELTA_RADIUS_UPPER  81.8f    
+/** @brief Rl：动平台三角形半径。 */
+#define DELTA_RADIUS_LOWER  25.0f    
+/** @brief L ：主动臂长度。 */
+#define DELTA_ARM_UPPER     185.0f   
+/** @brief La：从动臂（连杆）长度。 */
+#define DELTA_ARM_LOWER     270.0f   
 
-#define DELTA_INIT_X        1.0f
-#define DELTA_INIT_Y        0.0f
-#define DELTA_INIT_Z        (-124.9998f)
+/* --------------------------------------------------- 可达工作空间（Z 方向） */
+#define WORKSPACE_Z_MIN   (-340.26f)
+#define WORKSPACE_Z_MAX   (-77.10f)
+#define WORKSPACE_N_BINS  50
+#define WORKSPACE_DZ      ((WORKSPACE_Z_MAX - WORKSPACE_Z_MIN) / WORKSPACE_N_BINS)
 
-/* 工作空间参数 */
-#define WORKSPACE_Z_MIN  (-340.26f)
-#define WORKSPACE_Z_MAX  (-77.10f)
-#define WORKSPACE_N_BINS 50
-#define WORKSPACE_DZ     (7.343306f)   /* (Z_MAX - Z_MIN) / N_BINS */
+/* ------------------------------------------------------ 安全余量 */
+/* 施加在采样得到的工作空间边界上，确保机器人永远不会把关节
+ * 驱动到硬限位。 */
+/** @brief Z 方向限位向内收缩量。 */
+#define SAFETY_MARGIN_Z      3.0f    
+/** @brief 外半径收缩量。 */
+#define SAFETY_MARGIN_R_MAX  38.0f   
+/** @brief 中心孔扩大值。 */
+#define SAFETY_MARGIN_R_MIN  0.3f    
 
-/* 线性插补参数 */
-#define LINEAR_INTERP_STEP_MM   2.0f    // 笛卡尔空间插补步长 (mm)
-#define LINEAR_INTERP_MIN_STEPS 3       // 最少插补步数（避免极短距离抖动）
-
-/* ---------------- 安全间距（单位 mm） ---------------- */
-#define WORKSPACE_SAFETY_MARGIN_Z      3.0f   // Z 轴上下内缩量（防止碰撞上下平台）
-#define WORKSPACE_SAFETY_MARGIN_R_MAX  38.0f   // 最大半径方向内缩量（远离外边界，防止关节拉到极限）
-#define WORKSPACE_SAFETY_MARGIN_R_MIN  0.3f   // 最小半径方向外扩量（远离中心空洞，防止连杆干涉）
-
-/* 球形工作空间参数 */
-// 每层最大半径 (mm)
-static const float workspace_R_max[WORKSPACE_N_BINS] = {
+/* 每个 Z 切片的最大半径（mm），在真实机构上实测得到。 */
+static const float s_workspace_r_max[WORKSPACE_N_BINS] = {
     26.2f,  54.1f,  68.0f,  81.8f,  95.3f,
     108.4f, 121.1f, 117.1f, 133.2f, 144.7f,
     138.6f, 155.6f, 165.7f, 159.2f, 175.1f,
@@ -53,8 +57,9 @@ static const float workspace_R_max[WORKSPACE_N_BINS] = {
     196.8f, 194.5f, 193.4f, 191.2f, 188.8f,
     187.6f, 185.0f, 30.0f,  19.8f,  8.1f
 };
-// 每层最小半径 (mm) – 中心空洞区域的边界
-static const float workspace_R_min[WORKSPACE_N_BINS] = {
+
+/* 每个 Z 切片的最小半径（mm）：连杆相互干涉的中心孔区域。 */
+static const float s_workspace_r_min[WORKSPACE_N_BINS] = {
     0.0f,  0.0f,  14.7f, 0.0f,  0.0f,
     15.2f, 0.0f,  15.2f, 0.0f,  14.9f,
     0.0f,  14.5f, 14.6f, 0.0f,  13.9f,
@@ -67,501 +72,235 @@ static const float workspace_R_min[WORKSPACE_N_BINS] = {
     0.0f,  0.0f,  3.3f,  0.0f,  0.0f
 };
 
+/* ------------------------------------------------------ 运动学参考位置 */
+#define DELTA_INIT_X   1.0f
+#define DELTA_INIT_Y   0.0f
+#define DELTA_INIT_Z   (-124.9998f)
 
-/**
- * @brief 将笛卡尔坐标钳位到安全工作空间内（圆柱坐标 + 独立内外间距），超出时记录警告。
- * @param x 指向 X 坐标的指针（原地修改）
- * @param y 指向 Y 坐标的指针（原地修改）
- * @param z 指向 Z 坐标的指针（原地修改）
- *
- * 说明：
- *   - WORKSPACE_SAFETY_MARGIN_R_MAX：从外边界向内缩，避免关节拉到极限角度
- *   - WORKSPACE_SAFETY_MARGIN_R_MIN：从中心空洞边界向外扩，避免连杆干涉
- *   - 两者独立调节，互不干扰
- */
-void clamp_to_workspace(float *x, float *y, float *z)
+static float s_pos_x = DELTA_INIT_X;
+static float s_pos_y = DELTA_INIT_Y;
+static float s_pos_z = DELTA_INIT_Z;
+
+/* ================================================================ 工作空间 */
+
+/** @brief 在夹住 @p z 的两个工作空间切片之间做线性插值。 */
+static void workspace_radii_at(float z, float *r_max, float *r_min)
 {
-    float x_orig = *x, y_orig = *y, z_orig = *z;
+    float bin_float = (z - WORKSPACE_Z_MIN) / WORKSPACE_DZ;
 
-    /* ---- 1. Z 方向限位（带安全间距） ---- */
-    float z_min_safe = WORKSPACE_Z_MIN + WORKSPACE_SAFETY_MARGIN_Z;
-    float z_max_safe = WORKSPACE_Z_MAX - WORKSPACE_SAFETY_MARGIN_Z;
-
-    if (z_min_safe > z_max_safe) {
-        z_min_safe = WORKSPACE_Z_MIN;
-        z_max_safe = WORKSPACE_Z_MAX;
+    int bin = (int)bin_float;
+    if (bin < 0) {
+        bin = 0;
+    }
+    if (bin >= WORKSPACE_N_BINS) {
+        bin = WORKSPACE_N_BINS - 1;
     }
 
+    float frac = bin_float - (float)bin;
+    if (frac < 0.0f) {
+        frac = 0.0f;
+    }
+    if (frac > 1.0f) {
+        frac = 1.0f;
+    }
+
+    int next = (bin + 1 < WORKSPACE_N_BINS) ? bin + 1 : bin;
+
+    *r_max = s_workspace_r_max[bin] * (1.0f - frac) + s_workspace_r_max[next] * frac;
+    *r_min = s_workspace_r_min[bin] * (1.0f - frac) + s_workspace_r_min[next] * frac;
+}
+
+/**
+ * @brief 就地把笛卡尔点钳位到安全工作空间内。
+ *
+ * 先限制 Z，再按比例缩放 XY 半径，使其位于外边界（扣除安全余量）以内、
+ * 中心孔（加上安全余量）以外。越界请求会记录日志，便于回溯到调用者。
+ */
+static void clamp_to_workspace(float *x, float *y, float *z)
+{
+    float x_orig = *x;
+    float y_orig = *y;
+    float z_orig = *z;
+
+    /* ---- Z 方向限位，按安全余量向内收缩 ---- */
+    float z_min_safe = WORKSPACE_Z_MIN + SAFETY_MARGIN_Z;
+    float z_max_safe = WORKSPACE_Z_MAX - SAFETY_MARGIN_Z;
+
     if (*z < z_min_safe) {
-        ESP_LOGW(TAG, "Clamp Z: %.1f -> %.1f (min safe)", z_orig, z_min_safe);
+        ESP_LOGW(TAG, "Clamp Z: %.1f -> %.1f", z_orig, z_min_safe);
         *z = z_min_safe;
     } else if (*z > z_max_safe) {
-        ESP_LOGW(TAG, "Clamp Z: %.1f -> %.1f (max safe)", z_orig, z_max_safe);
+        ESP_LOGW(TAG, "Clamp Z: %.1f -> %.1f", z_orig, z_max_safe);
         *z = z_max_safe;
     }
 
-    /* ---- 2. 计算当前 Z 对应的边界插值 ---- */
-    float bin_float = (*z - WORKSPACE_Z_MIN) / WORKSPACE_DZ;
-    int bin = (int)bin_float;
-    if (bin < 0) bin = 0;
-    if (bin >= WORKSPACE_N_BINS) bin = WORKSPACE_N_BINS - 1;
+    /* ---- （可能已调整的）Z 所对应的半径限位 ---- */
+    float r_max_raw;
+    float r_min_raw;
+    workspace_radii_at(*z, &r_max_raw, &r_min_raw);
 
-    float frac = bin_float - (float)bin;
-    if (frac < 0.0f) frac = 0.0f;
-    if (frac > 1.0f) frac = 1.0f;
-
-    int next_bin = (bin + 1 < WORKSPACE_N_BINS) ? bin + 1 : bin;
-
-    float R_max_raw = workspace_R_max[bin] * (1.0f - frac) +
-                      workspace_R_max[next_bin] * frac;
-    float R_min_raw = workspace_R_min[bin] * (1.0f - frac) +
-                      workspace_R_min[next_bin] * frac;
-
-    /* ---- 3. 分别施加最大/最小半径方向安全间距 ---- */
-    // 外边界内缩：防止关节拉到极限角度
-    float R_max_safe = R_max_raw - WORKSPACE_SAFETY_MARGIN_R_MAX;
-    if (R_max_safe < 0.0f) R_max_safe = 0.0f;
-
-    // 中心空洞外扩：防止连杆干涉（仅当原始 R_min > 0 时有效）
-    float R_min_safe;
-    if (R_min_raw > 0.001f) {
-        // 该高度存在中心空洞，向外再扩 SAFETY_MARGIN_R_MIN
-        R_min_safe = R_min_raw + WORKSPACE_SAFETY_MARGIN_R_MIN;
-    } else {
-        // 该高度无空洞，不设最小半径限制
-        R_min_safe = 0.0f;
+    float r_max_safe = r_max_raw - SAFETY_MARGIN_R_MAX;
+    if (r_max_safe < 0.0f) {
+        r_max_safe = 0.0f;
     }
 
-    // 防御：外扩后的最小半径不能超过最大安全半径
-    if (R_min_safe > R_max_safe) {
-        R_min_safe = R_max_safe * 0.95f;  // 留一点余地
+    float r_min_safe = (r_min_raw > 0.001f) ? (r_min_raw + SAFETY_MARGIN_R_MIN) : 0.0f;
+    if (r_min_safe > r_max_safe) {
+        r_min_safe = r_max_safe * 0.95f;
     }
 
-    /* ---- 4. XY 半径限位 ---- */
     float radius = sqrtf((*x) * (*x) + (*y) * (*y));
 
-    // 超出外边界 → 沿径向缩回
-    if (radius > R_max_safe) {
-        float scale = R_max_safe / radius;
-        float new_x = *x * scale;
-        float new_y = *y * scale;
-        ESP_LOGW(TAG, "Clamp R_MAX: radius %.1f -> %.1f (limit %.1f). "
-                 "XY: (%.1f,%.1f) -> (%.1f,%.1f)",
-                 radius, R_max_safe, R_max_safe,
-                 x_orig, y_orig, new_x, new_y);
-        *x = new_x;
-        *y = new_y;
-    }
-    // 落入中心空洞 → 沿径向推离
-    else if (radius < R_min_safe && R_min_safe > 0.001f) {
+    if (radius > r_max_safe) {
+        float scale = r_max_safe / radius;
+        ESP_LOGW(TAG, "Clamp R_MAX: %.1f -> %.1f, XY (%.1f,%.1f) -> (%.1f,%.1f)",
+                 radius, r_max_safe, x_orig, y_orig, *x * scale, *y * scale);
+        *x *= scale;
+        *y *= scale;
+    } else if (r_min_safe > 0.001f && radius < r_min_safe) {
         if (radius < 0.001f) {
-            // 原点特殊处理：推到 X 轴正方向
-            ESP_LOGW(TAG, "Clamp R_MIN: at origin, pushed to R=%.1f. XY: (0,0) -> (%.1f,0)",
-                     R_min_safe, R_min_safe);
-            *x = R_min_safe;
+            ESP_LOGW(TAG, "Clamp R_MIN: origin pushed to R=%.1f", r_min_safe);
+            *x = r_min_safe;
             *y = 0.0f;
         } else {
-            float scale = R_min_safe / radius;
-            float new_x = *x * scale;
-            float new_y = *y * scale;
-            ESP_LOGW(TAG, "Clamp R_MIN: radius %.1f -> %.1f (limit %.1f). "
-                     "XY: (%.1f,%.1f) -> (%.1f,%.1f)",
-                     radius, R_min_safe, R_min_safe,
-                     x_orig, y_orig, new_x, new_y);
-            *x = new_x;
-            *y = new_y;
+            float scale = r_min_safe / radius;
+            ESP_LOGW(TAG, "Clamp R_MIN: %.1f -> %.1f, XY (%.1f,%.1f) -> (%.1f,%.1f)",
+                     radius, r_min_safe, x_orig, y_orig, *x * scale, *y * scale);
+            *x *= scale;
+            *y *= scale;
         }
     }
 }
 
-/**
- * @brief 目前delta 坐标结构体
- *
- */
-typedef struct {
-    float x_coord;
-    float y_coord;
-    float z_coord;
-}delta_coord_T;
-
+/* ============================================================== 逆运动学 */
 
 /**
- * @brief 逆运动学计算结果结构体
+ * @brief 求解 `K*t^2 + U*t + V = 0`，其中 `t = tan(theta/2)`。
+ * @return 成功返回 1；该腿无实数解时返回 0。
  */
-typedef struct {
-    float theta1; // 角度1 (度)
-    float theta2; // 角度2 (度)
-    float theta3; // 角度3 (度)
+static int solve_leg(float A, float B, float C, float *theta_deg)
+{
+    float K = A + B;
+    float U = 2.0f * C;
+    float V = A - B;
 
-} delta_ik_result_t;
+    if (fabsf(K) < 1e-6f) {
+        return 0;
+    }
 
-/*  */
-static delta_coord_T delta_coord = {0};
+    float disc = U * U - 4.0f * K * V;
+    if (disc < 0.0f) {
+        return 0;
+    }
 
-// static void clamp_coord(float *x, float *y, float *z) {
-//     if (*x < DELTA_MOVE_SAFE_MIN_X) *x = DELTA_MOVE_SAFE_MIN_X;
-//     if (*y < DELTA_MOVE_SAFE_MIN_Y) *y = DELTA_MOVE_SAFE_MIN_Y;
-//     if (*z < DELTA_MOVE_SAFE_MIN_Z) *z = DELTA_MOVE_SAFE_MIN_Z;
-//
-//     if (*x > DELTA_MOVE_SAFE_MAX_X) *x = DELTA_MOVE_SAFE_MAX_X;
-//     if (*y > DELTA_MOVE_SAFE_MAX_Y) *y = DELTA_MOVE_SAFE_MAX_Y;
-//     if (*z > DELTA_MOVE_SAFE_MAX_Z) *z = DELTA_MOVE_SAFE_MAX_Z;
-// }
+    float tan_half = (-U - sqrtf(disc)) / (2.0f * K);
+    if (isnan(tan_half) || isinf(tan_half)) {
+        return 0;
+    }
 
-
-/**
- * @brief Delta 机器人逆运动学计算
- * @param x 目标X坐标
- * @param y 目标Y坐标
- * @param z 目标Z坐标
- * @param result 计算结果输出
- * @return 有解1 无解0
- */
-static uint8_t Delta_CalculateIK(float x, float y, float z, delta_ik_result_t* result) {
-    float Ru = DELTA_ROBOT_RADIUS_UPPER;
-    float Rl = DELTA_ROBOT_RADIUS_LOWER;
-    float L = DELTA_ROBOT_ARM_UPPER;
-    float La = DELTA_ROBOT_ARM_LOWER;
-
-
-    // 中间变量计算
-    float x2_y2_z2 = x*x + y*y + z*z;
-    float R_diff = Ru - Rl;
-
-    // --- 机械臂 1 (Leg 1) 计算 ---
-    float A1 = (x2_y2_z2 + L*L - La*La + R_diff*R_diff - 2*x*R_diff) / (2*L);
-    float B1 = -(R_diff - x);
-    float C1 = z;
-
-    float K1 = A1 + B1;
-    float U1 = 2 * C1;
-    float V1 = A1 - B1;
-
-    // 判别式检查 (确保有实数解)
-    float discriminant1 = U1*U1 - 4*K1*V1;
-    if(discriminant1 < 0) return 0; // 无解
-    float sqrt_disc1 = sqrtf(discriminant1);
-
-    // 计算角度 (注意 atan 的范围处理)
-    float tan_half_theta1 = (-U1 - sqrt_disc1) / (2 * K1);
-    // 防止 atan 输入溢出 (接近垂直的情况)
-    if(isnan(tan_half_theta1) || isinf(tan_half_theta1)) return 1;
-
-    result->theta1 = 2.0f * atanf(tan_half_theta1);
-    result->theta1 = result->theta1 * 180.0f / M_PI_F; // 弧度转角度
-
-    // --- 机械臂 2 (Leg 2) 计算 ---
-    float temp2 = (x - sqrtf(3.0f)*y);
-    float A2 = (x2_y2_z2 + L*L - La*La + R_diff*R_diff + temp2 * R_diff) / L;
-    float B2 = -2*R_diff - temp2;
-    float C2 = 2*z;
-
-    float K2 = A2 + B2;
-    float U2 = 2 * C2;
-    float V2 = A2 - B2;
-
-    float discriminant2 = U2*U2 - 4*K2*V2;
-    if(discriminant2 < 0) return 0;
-    float sqrt_disc2 = sqrtf(discriminant2);
-
-    float tan_half_theta2 = (-U2 - sqrt_disc2) / (2 * K2);
-    if(isnan(tan_half_theta2) || isinf(tan_half_theta2)) return 1;
-
-    result->theta2 = 2.0f * atanf(tan_half_theta2);
-    result->theta2 = result->theta2 * 180.0f / M_PI_F;
-
-    // --- 机械臂 3 (Leg 3) 计算 ---
-    float temp3 = (x + sqrtf(3.0f)*y);
-    float A3 = (x2_y2_z2 + L*L - La*La + R_diff*R_diff + temp3 * R_diff) / L;
-    float B3 = -2*R_diff - temp3;
-    float C3 = 2*z;
-
-    float K3 = A3 + B3;
-    float U3 = 2 * C3;
-    float V3 = A3 - B3;
-
-    float discriminant3 = U3*U3 - 4*K3*V3;
-    if(discriminant3 < 0) return 0;
-    float sqrt_disc3 = sqrtf(discriminant3);
-
-    float tan_half_theta3 = (-U3 - sqrt_disc3) / (2 * K3);
-    if(isnan(tan_half_theta3) || isinf(tan_half_theta3)) return 1;
-
-    result->theta3 = 2.0f * atanf(tan_half_theta3);
-    result->theta3 = result->theta3 * 180.0f / M_PI_F;
-
+    *theta_deg = 2.0f * atanf(tan_half) * RAD_TO_DEG;
     return 1;
 }
 
-/** 公开API*/
-void delta_init(void) {
-    delta_coord.x_coord = DELTA_INIT_X;
-    delta_coord.y_coord = DELTA_INIT_Y;
-    delta_coord.z_coord = DELTA_INIT_Z;
-}
-
 /**
- * @brief 笛卡尔空间线性插补移动（阻塞式）
- *        将末端从当前位置沿直线移动到目标点，自动分段并逐段等待到位。
- *
- * @param x, y, z   目标笛卡尔坐标 (mm)
- * @param speed     关节运动速度
- * @param accel     关节运动加速度
- * @param timeout_ms 总超时时间 (ms)
- * @return ESP_OK 成功, 其它 失败
+ * @brief 三臂 delta 机构的闭式逆运动学求解。
+ * @param theta  输出三个主动臂角度，单位：度
+ * @return 点可达返回 1，否则返回 0
  */
-esp_err_t delta_move_linear(float x, float y, float z,
-                            uint32_t speed, uint8_t accel,
-                            uint32_t timeout_ms)
+static int delta_solve_ik(float x, float y, float z, float theta[3])
 {
-    /* ---- 1. 记录起点（当前笛卡尔坐标） ---- */
-    float start_x = delta_coord.x_coord;
-    float start_y = delta_coord.y_coord;
-    float start_z = delta_coord.z_coord;
+    const float Ru = DELTA_RADIUS_UPPER;
+    const float Rl = DELTA_RADIUS_LOWER;
+    const float L  = DELTA_ARM_UPPER;
+    const float La = DELTA_ARM_LOWER;
 
-    /* ---- 2. 目标点钳位 ---- */
-    clamp_to_workspace(&x, &y, &z);
+    float d2 = x * x + y * y + z * z;
+    float Rd = Ru - Rl;
+    float base = d2 + L * L - La * La + Rd * Rd;
 
-    /* ---- 3. 计算笛卡尔总位移 ---- */
-    float dx = x - start_x;
-    float dy = y - start_y;
-    float dz = z - start_z;
-    float total_dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    /* 第 1 腿（0 度） */
+    float A1 = (base - 2.0f * x * Rd) / (2.0f * L);
+    float B1 = x - Rd;
+    float C1 = z;
 
-    /* ---- 4. 确定插补步数 ---- */
-    int num_steps = (int)(total_dist / LINEAR_INTERP_STEP_MM);
-    if (num_steps < LINEAR_INTERP_MIN_STEPS) {
-        num_steps = LINEAR_INTERP_MIN_STEPS;
-    }
+    /* 第 2 腿（120 度） */
+    float t2 = x - SQRT3 * y;
+    float A2 = (base + t2 * Rd) / L;
+    float B2 = -2.0f * Rd - t2;
+    float C2 = 2.0f * z;
 
-    uint32_t segment_timeout = timeout_ms / (uint32_t)num_steps;
-    if (segment_timeout < 100) {
-        segment_timeout = 100;   // 每段至少 100ms 超时
-    }
+    /* 第 3 腿（240 度） */
+    float t3 = x + SQRT3 * y;
+    float A3 = (base + t3 * Rd) / L;
+    float B3 = -2.0f * Rd - t3;
+    float C3 = 2.0f * z;
 
-    ESP_LOGI(TAG, "Linear move: (%.1f,%.1f,%.1f) -> (%.1f,%.1f,%.1f), "
-             "dist=%.1fmm, steps=%d",
-             start_x, start_y, start_z, x, y, z, total_dist, num_steps);
-
-    /* ---- 5. 逐段插补 ---- */
-    for (int i = 1; i <= num_steps; i++) {
-        float t = (float)i / (float)num_steps;   // 0..1 比例
-
-        // 线性插值
-        float ix = start_x + dx * t;
-        float iy = start_y + dy * t;
-        float iz = start_z + dz * t;
-
-        // 中间点也做一次钳位（防止数值误差导致略超边界）
-        clamp_to_workspace(&ix, &iy, &iz);
-
-        // 逆运动学解算
-        delta_ik_result_t result;
-        if (!Delta_CalculateIK(ix, iy, iz, &result)) {
-            ESP_LOGE(TAG, "IK fail at interpolation step %d/%d: (%.1f,%.1f,%.1f)",
-                     i, num_steps, ix, iy, iz);
-            return ESP_ERR_INVALID_ARG;
-        }
-
-        // 下发电机目标
-        esp_err_t ret = move_abs(result.theta1, result.theta2, result.theta3,
-                                 speed, accel, (int)segment_timeout);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "move_abs fail at step %d: %x", i, ret);
-            return ret;
-        }
-
-        // 等待本段到位
-        ret = move_wait_all_reached(segment_timeout);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Timeout at step %d/%d", i, num_steps);
-            return ret;
-        }
-    }
-
-    /* ---- 6. 更新当前位置记录 ---- */
-    delta_coord.x_coord = x;
-    delta_coord.y_coord = y;
-    delta_coord.z_coord = z;
-
-    ESP_LOGI(TAG, "Linear move complete");
-    return ESP_OK;
+    return solve_leg(A1, B1, C1, &theta[0]) &&
+           solve_leg(A2, B2, C2, &theta[1]) &&
+           solve_leg(A3, B3, C3, &theta[2]);
 }
 
+/* =================================================================== 公共接口 */
 
-// delta.c 中修改 delta_go_to
-esp_err_t delta_go_to(float x, float y, float z,
-                      uint32_t speed, uint8_t accel,
-                      uint32_t timeout_ms)
+void delta_init(void)
 {
-    delta_ik_result_t result = {0};
+    s_pos_x = DELTA_INIT_X;
+    s_pos_y = DELTA_INIT_Y;
+    s_pos_z = DELTA_INIT_Z;
+    ESP_LOGI(TAG, "Reference position: (%.2f, %.2f, %.2f)",
+             (double)s_pos_x, (double)s_pos_y, (double)s_pos_z);
+}
 
-    clamp_to_workspace(&x, &y, &z);
+/** @brief 公共前置处理：钳位、求解并发布新的参考位置。 */
+static esp_err_t prepare_target(float *x, float *y, float *z, float theta[3])
+{
+    clamp_to_workspace(x, y, z);
 
-    uint8_t is_able = Delta_CalculateIK(x, y, z, &result);
-    if (!is_able) {
-        ESP_LOGE(TAG, "IK fail: (%.1f, %.1f, %.1f)", x, y, z);
+    if (!delta_solve_ik(*x, *y, *z, theta)) {
+        ESP_LOGE(TAG, "IK failed for (%.1f, %.1f, %.1f)", (double)*x, (double)*y, (double)*z);
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "IK: θ1=%.2f° θ2=%.2f° θ3=%.2f°",
-             result.theta1, result.theta2, result.theta3);
+    s_pos_x = *x;
+    s_pos_y = *y;
+    s_pos_z = *z;
+    return ESP_OK;
+}
 
-    // 发送同步运动命令（move_abs 已修复错误传递，失败不会更新坐标）
-    esp_err_t ret = move_abs_async(result.theta1, result.theta2, result.theta3,
-                             speed, accel, timeout_ms);
+esp_err_t delta_go_to(float x, float y, float z,
+                      uint32_t speed, uint8_t accel, uint32_t timeout_ms)
+{
+    float theta[3];
+    esp_err_t ret = prepare_target(&x, &y, &z, theta);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "move_abs fail: %x", ret);
         return ret;
     }
 
-    //改用事件驱动等待（零 CPU 占用，由位置轮询 + 9F 回调唤醒）
-    ret = move_wait_all_reached_evt(timeout_ms);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Wait timeout (motor may be stuck, forced recovery)");
-    }
-    // 更新当前笛卡尔坐标
-    delta_coord.x_coord = x;
-    delta_coord.y_coord = y;
-    delta_coord.z_coord = z;
-    return ret;   // 返回实际等待结果
+    ESP_LOGD(TAG, "Move to (%.1f, %.1f, %.1f), angles (%.2f, %.2f, %.2f)",
+             (double)x, (double)y, (double)z,
+             (double)theta[0], (double)theta[1], (double)theta[2]);
+
+    return move_abs(theta[0], theta[1], theta[2], speed, accel, timeout_ms);
 }
 
 esp_err_t delta_go_to_async(float x, float y, float z,
-                            uint32_t speed, uint8_t accel,
-                            uint32_t timeout_ms)
+                            uint32_t speed, uint8_t accel, uint32_t timeout_ms)
 {
-    delta_ik_result_t result = {0};
-    clamp_to_workspace(&x, &y, &z);
-
-    if (!Delta_CalculateIK(x, y, z, &result)) {
-        ESP_LOGE(TAG, "IK fail for async: (%.1f, %.1f, %.1f)", x, y, z);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // 直接发送，不经过队列，不等待
-    esp_err_t ret = move_abs_fire(result.theta1, result.theta2, result.theta3,
-                                  speed, accel, timeout_ms);
+    float theta[3];
+    esp_err_t ret = prepare_target(&x, &y, &z, theta);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "move_abs_fire fail: %x", ret);
         return ret;
     }
-
-    delta_coord.x_coord = x;
-    delta_coord.y_coord = y;
-    delta_coord.z_coord = z;
-    return ESP_OK;
+    return move_abs_fire(theta[0], theta[1], theta[2], speed, accel, timeout_ms);
 }
 
 esp_err_t delta_go_to_queue(float x, float y, float z,
-                            uint32_t speed, uint8_t accel,
-                            uint32_t timeout_ms)
+                            uint32_t speed, uint8_t accel, uint32_t timeout_ms)
 {
-    delta_ik_result_t result = {0};
-    clamp_to_workspace(&x, &y, &z);
-
-    if (!Delta_CalculateIK(x, y, z, &result)) {
-        ESP_LOGE(TAG, "IK fail for async: (%.1f, %.1f, %.1f)", x, y, z);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // 直接发送，不经过队列，不等待
-    esp_err_t ret = move_abs_async(result.theta1, result.theta2, result.theta3,
-                                  speed, accel, timeout_ms);
+    float theta[3];
+    esp_err_t ret = prepare_target(&x, &y, &z, theta);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "move_abs_fire fail: %x", ret);
         return ret;
     }
-
-    delta_coord.x_coord = x;
-    delta_coord.y_coord = y;
-    delta_coord.z_coord = z;
-    return ESP_OK;
-}
-
-
-esp_err_t move_homing_all_async (uint32_t timeout_ms)
-{
-    if (!g_move_queue) return ESP_ERR_INVALID_STATE;
-
-    move_cmd_t cmd = {
-        .type = MOVE_CMD_HOMING,
-        .timeout_ms = timeout_ms,
-    };
-
-    if (xQueueSend(g_move_queue, &cmd, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Move queue full, dropping command");
-        return ESP_ERR_INVALID_STATE;
-    }
-    return ESP_OK;
-}
-
-esp_err_t move_set_enable_async(uint8_t motor_id, uint8_t enable_val, uint32_t timeout_ms)
-{
-    if (!g_move_queue) return ESP_ERR_INVALID_STATE;
-
-    move_cmd_t cmd = {
-        .type = MOVE_CMD_SET_ENABLE,
-        .set_enable_motor_id = motor_id,
-        .set_enable_val = enable_val,
-        .timeout_ms = timeout_ms,
-    };
-
-    if (xQueueSend(g_move_queue, &cmd, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Move queue full, dropping command");
-        return ESP_ERR_INVALID_STATE;
-    }
-    return ESP_OK;
-}
-
-esp_err_t move_set_zero_position_async(uint8_t motor_id, uint32_t timeout_ms) {
-    if (!g_move_queue) return ESP_ERR_INVALID_STATE;
-
-    move_cmd_t cmd = {
-        .type = MOVE_CMD_SET_ZERO,
-        .set_zero_motor_id = motor_id,
-        .timeout_ms = timeout_ms,
-    };
-
-    if (xQueueSend(g_move_queue, &cmd, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Move queue full, dropping command");
-        return ESP_ERR_INVALID_STATE;
-    }
-    return ESP_OK;
-}
-
-esp_err_t delta_claw_eoa(Servo *servo, uint32_t timeout_ms) {
-    static uint8_t flag = 0;
-    if (!flag) {
-        servo->set_angle(servo, 95.0f);
-        flag = 1;
-    }
-    else {
-        servo->set_angle(servo, 0.0f);
-        flag = 0;
-    }
-    ESP_LOGI(TAG, "delta_eoa(servo, 45.0f)");
-    return ESP_OK;
-}
-
-esp_err_t delta_pump_eoa(Servo *p_servo, Servo *v_servo, uint32_t timeout_ms) {
-    static uint8_t flag = 0;
-    if (!flag) {
-        v_servo->set_angle(v_servo, 0.0f);
-        p_servo->set_angle(p_servo, 180.0f);
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        p_servo->set_angle(p_servo, 0.0f);
-        flag = 1;
-        ESP_LOGI(TAG, "Absorb items");
-    }
-    else {
-        p_servo->set_angle(p_servo, 0.0f);
-        v_servo->set_angle(v_servo, 180.0f);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        v_servo->set_angle(v_servo, 0.0f);
-        flag = 0;
-        ESP_LOGI(TAG, "Put down the item");
-    }
-
-    return ESP_OK;
+    return move_abs_async(theta[0], theta[1], theta[2], speed, accel, timeout_ms);
 }

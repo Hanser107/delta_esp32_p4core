@@ -1,55 +1,59 @@
+/**
+ * @file motor_feedback.c
+ * @brief ZDT_X42S 闭环步进电机协议层的实现：组帧、接收解析与主动上报分发。
+ * @details 支持固定 0x6B、XOR 与 CRC-8 三种校验方式，并通过互斥锁保证
+ *          命令/应答交换的原子性。
+ */
+
 #include "motor_feedback.h"
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "freertos/queue.h"
 #include "freertos/semphr.h"
 
 static const char *TAG = "motor_fb";
 
-/* ---- 内部常量 ---- */
+/** @brief 接收缓冲区大小（字节）。 */
+#define RX_BUF_SIZE     512
+/** @brief 单帧最大长度（字节）。 */
+#define MAX_FRAME_LEN   72
 
-// 接收缓冲区大小
-#define _RX_BUF_SIZE        512
-// 最大帧长度
-#define _MAX_FRAME_LEN      72
-
-/** 功能码 → 固定数据长度映射表（0xFF 表示变长） */
-static const uint8_t _func_data_len[256] = {
-    [0x13] = 6,   // 过热过流检测阈值
-    [0x16] = 4,   // 心跳保护时间
-    [0x1A] = 1,   // 选项参数状态
-    [0x1F] = 4,   // 固件版本 + 硬件版本
-    [0x20] = 4,   // 相电阻 + 相电感
-    [0x21] = 0xFF,// PID 参数（变长）
-    [0x22] = 16,  // 回零参数
-    [0x23] = 4,   // 积分限幅 / 刚性系数
-    [0x24] = 2,   // 总线电压
-    [0x26] = 2,   // 总线电流
-    [0x27] = 2,   // 相电流
-    [0x31] = 2,   // 线性化编码器值
-    [0x32] = 5,   // 输入脉冲数
-    [0x33] = 5,   // 目标位置
-    [0x34] = 5,   // 实时设定目标位置
-    [0x35] = 3,   // 实时转速
-    [0x36] = 5,   // 实时位置
-    [0x37] = 5,   // 位置误差
-    [0x38] = 2,   // 电池电压 (Y42)
-    [0x39] = 2,   // 驱动温度 (X42S/Y42)
-    [0x3A] = 1,   // 电机状态标志
-    [0x3B] = 1,   // 回零状态标志
-    [0x3C] = 2,   // 回零状态 + 电机状态
-    [0x3D] = 1,   // IO 电平状态
-    [0x3F] = 2,   // 碰撞回零返回角度
-    [0x41] = 2,   // 位置到达窗口
-    [0x42] = 0xFF,// 驱动配置参数（变长）
-    [0x43] = 0xFF,// 系统状态参数（变长）
-    [0x49] = 0xFF,// DMX512 参数（变长）
+/** @brief 功能码到固定负载长度的映射（0xFF 表示变长应答）。 */
+static const uint8_t s_func_data_len[256] = {
+    [0x13] = 6,    // 过温/过流阈值
+    [0x16] = 4,    // 心跳保护时间
+    [0x1A] = 1,    // 选项参数状态
+    [0x1F] = 4,    // 固件 + 硬件版本
+    [0x20] = 4,    // 相电阻 + 相电感
+    [0x21] = 0xFF, // PID 参数（变长）
+    [0x22] = 16,   // 回零参数
+    [0x23] = 4,    // 积分钳位 / 刚度
+    [0x24] = 2,    // 总线电压
+    [0x26] = 2,    // 总线电流
+    [0x27] = 2,    // 相电流
+    [0x31] = 2,    // 线性化编码器值
+    [0x32] = 5,    // 输入脉冲计数
+    [0x33] = 5,    // 目标位置
+    [0x34] = 5,    // 实时目标位置
+    [0x35] = 3,    // 实时速度
+    [0x36] = 5,    // 实时位置
+    [0x37] = 5,    // 位置误差
+    [0x38] = 2,    // 电池电压（Y42）
+    [0x39] = 2,    // 驱动温度
+    [0x3A] = 1,    // 电机状态标志
+    [0x3B] = 1,    // 回零状态标志
+    [0x3C] = 2,    // 回零 + 电机状态
+    [0x3D] = 1,    // IO 电平状态
+    [0x3F] = 2,    // 碰撞回零角度
+    [0x41] = 2,    // 到位窗口
+    [0x42] = 0xFF, // 驱动配置（变长）
+    [0x43] = 0xFF, // 系统状态（变长）
+    [0x49] = 0xFF, // DMX512 参数（变长）
 };
 
-/** CRC-8 查找表（与手册一致） */
-static const uint8_t _crc8_table[256] = {
+/** @brief CRC-8 查找表（厂商多项式，见手册）。 */
+static const uint8_t s_crc8_table[256] = {
     0x00, 0x5E, 0xBC, 0xE2, 0x61, 0x3F, 0xDD, 0x83,
     0xC2, 0x9C, 0x7E, 0x20, 0xA3, 0xFD, 0x1F, 0x41,
     0x9D, 0xC3, 0x21, 0x7F, 0xFC, 0xA2, 0x40, 0x1E,
@@ -84,83 +88,109 @@ static const uint8_t _crc8_table[256] = {
     0xB6, 0xE8, 0x0A, 0x54, 0xD7, 0x89, 0x6B, 0x35,
 };
 
-/* ---- 上下文结构 ---- */
 typedef struct motor_feedback_ctx {
     uart_comm_handle_t      uart;
     motor_feedback_config_t cfg;
 
-    // 接收缓冲区
-    uint8_t                 rx_buf[_RX_BUF_SIZE];
+    uint8_t                 rx_buf[RX_BUF_SIZE];
     size_t                  rx_buf_len;
 
-    // FreeRTOS 同步原语
-    QueueHandle_t           response_queue;
-    SemaphoreHandle_t       sync_sem;       // 用于“命令-响应”同步
-    SemaphoreHandle_t       mutex;          // 保护 send_and_wait 原子性
+    SemaphoreHandle_t       sync_sem;   ///< 期望的应答到达时释放
+    SemaphoreHandle_t       mutex;      ///< 串行化发送-等待交换
 
-    // 用户回调
-    motor_feedback_callback_t  callback;
+    motor_feedback_callback_t callback;
     void                     *callback_ctx;
 
-    // 同步等待状态
     motor_response_t        sync_response;
     bool                    sync_pending;
     uint8_t                 sync_expected_func;
 } motor_feedback_ctx_t;
 
-/* ---- 前向声明 ---- */
 static void _uart_rx_callback(const uint8_t *data, size_t len, void *user_ctx);
 static bool _try_extract_frame(motor_feedback_ctx_t *ctx);
-static void _process_frame(motor_feedback_ctx_t *ctx,
-                           const uint8_t *frame, size_t frame_len);
+static void _process_frame(motor_feedback_ctx_t *ctx, const uint8_t *frame, size_t frame_len);
 
-/* ---- 公共 API 实现 ---- */
+/* ------------------------------------------------------------------ 校验 */
+
+static int _func_data_len(uint8_t func_code)
+{
+    uint8_t len = s_func_data_len[func_code];
+    return (len == 0xFF) ? -1 : (int)len;
+}
+
+static uint8_t _calc_checksum(const uint8_t *data, size_t len, motor_checksum_type_t type)
+{
+    if (len == 0) {
+        return 0;
+    }
+    switch (type) {
+    case MOTOR_CHECKSUM_XOR: {
+        uint8_t x = data[0];
+        for (size_t i = 1; i < len; i++) {
+            x ^= data[i];
+        }
+        return x;
+    }
+    case MOTOR_CHECKSUM_CRC8: {
+        uint8_t crc = data[0];
+        for (size_t i = 1; i < len; i++) {
+            crc = s_crc8_table[crc ^ data[i]];
+        }
+        return crc;
+    }
+    case MOTOR_CHECKSUM_6B:
+    default:
+        return 0x6B;
+    }
+}
+
+static bool _verify_checksum(const uint8_t *data, size_t len, motor_checksum_type_t type)
+{
+    if (len < 2) {
+        return false;
+    }
+    return data[len - 1] == _calc_checksum(data, len - 1, type);
+}
+
+/** @brief 丢弃最旧的一个字节，使帧扫描器重新同步。 */
+static bool _discard_one_byte(motor_feedback_ctx_t *ctx)
+{
+    memmove(ctx->rx_buf, ctx->rx_buf + 1, ctx->rx_buf_len - 1);
+    ctx->rx_buf_len--;
+    return ctx->rx_buf_len >= 3;
+}
+
+/* ------------------------------------------------------------------ 公共 API */
 
 esp_err_t motor_feedback_init(uart_comm_handle_t uart,
                               const motor_feedback_config_t *config,
                               motor_feedback_handle_t *handle)
 {
-    if (!uart || !config || !handle) return ESP_ERR_INVALID_ARG;
+    if (!uart || !config || !handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
     motor_feedback_ctx_t *ctx = calloc(1, sizeof(*ctx));
-    if (!ctx) return ESP_ERR_NO_MEM;
-
+    if (!ctx) {
+        return ESP_ERR_NO_MEM;
+    }
     ctx->uart = uart;
     ctx->cfg  = *config;
 
-    // 创建队列与信号量
-    ctx->response_queue = xQueueCreate(config->response_queue_size,
-                                       sizeof(motor_response_t));
     ctx->sync_sem = xSemaphoreCreateBinary();
     ctx->mutex    = xSemaphoreCreateMutex();
-
-    if (!ctx->response_queue || !ctx->sync_sem || !ctx->mutex) {
+    if (!ctx->sync_sem || !ctx->mutex) {
+        if (ctx->sync_sem) vSemaphoreDelete(ctx->sync_sem);
+        if (ctx->mutex)    vSemaphoreDelete(ctx->mutex);
         free(ctx);
         return ESP_ERR_NO_MEM;
     }
 
-    // 注册到 uart_comm 的接收回调
     uart_comm_set_rx_callback(uart, _uart_rx_callback, ctx);
 
     *handle = ctx;
-    ESP_LOGI(TAG, "Initialized (listen_addr=0x%02X, checksum=%d)",
+    ESP_LOGI(TAG, "Protocol layer ready (listen_addr=0x%02X, checksum=%d)",
              ctx->cfg.listen_addr, ctx->cfg.checksum_type);
-    return ESP_OK;
-}
-
-esp_err_t motor_feedback_deinit(motor_feedback_handle_t handle)
-{
-    if (!handle) return ESP_ERR_INVALID_ARG;
-    motor_feedback_ctx_t *ctx = handle;
-
-    // 注销回调（可选，但最好做）
-    uart_comm_set_rx_callback(ctx->uart, NULL, NULL);
-
-    if (ctx->response_queue) vQueueDelete(ctx->response_queue);
-    if (ctx->sync_sem)       vSemaphoreDelete(ctx->sync_sem);
-    if (ctx->mutex)          vSemaphoreDelete(ctx->mutex);
-
-    free(ctx);
     return ESP_OK;
 }
 
@@ -169,23 +199,20 @@ esp_err_t motor_feedback_send_and_wait(motor_feedback_handle_t handle,
                                        motor_response_t *response,
                                        uint32_t timeout_ms)
 {
-    if (!handle || !cmd || cmd_len < 3 || !response)
+    if (!handle || !cmd || cmd_len < 3) {
         return ESP_ERR_INVALID_ARG;
-
+    }
     motor_feedback_ctx_t *ctx = handle;
 
-    // 互斥锁，保证同一时间只有一个 send_and_wait
     if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
-    // 准备工作：清空残留、设置期望功能码
-    motor_feedback_flush(handle);
-
+    /* 在开启应答匹配器之前丢弃所有残留字节。 */
+    ctx->rx_buf_len         = 0;
     ctx->sync_expected_func = cmd[1];
     ctx->sync_pending       = true;
 
-    // 发送命令（底层自动处理阻塞）
     esp_err_t ret = uart_comm_send(ctx->uart, cmd, cmd_len);
     if (ret != ESP_OK) {
         ctx->sync_pending = false;
@@ -193,9 +220,10 @@ esp_err_t motor_feedback_send_and_wait(motor_feedback_handle_t handle,
         return ret;
     }
 
-    // 等待信号量（接收任务在匹配帧时给出）
     if (xSemaphoreTake(ctx->sync_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
-        *response = ctx->sync_response;
+        if (response) {
+            *response = ctx->sync_response;
+        }
         ret = ESP_OK;
     } else {
         ret = ESP_ERR_TIMEOUT;
@@ -206,9 +234,6 @@ esp_err_t motor_feedback_send_and_wait(motor_feedback_handle_t handle,
     return ret;
 }
 
-
-
-
 esp_err_t motor_read_register(motor_feedback_handle_t handle,
                               uint8_t addr,
                               uint8_t func,
@@ -216,22 +241,17 @@ esp_err_t motor_read_register(motor_feedback_handle_t handle,
                               uint8_t *data_len,
                               uint32_t timeout_ms)
 {
-    // 构造读取命令：地址 + 功能码 + 校验码(0x6B)
     uint8_t cmd[3] = { addr, func, 0x6B };
 
     motor_response_t resp;
-    esp_err_t ret = motor_feedback_send_and_wait(handle, cmd, sizeof(cmd),
-                                                 &resp, timeout_ms);
+    esp_err_t ret = motor_feedback_send_and_wait(handle, cmd, sizeof(cmd), &resp, timeout_ms);
     if (ret != ESP_OK) {
         return ret;
     }
-
-    // 检查返回的功能码是否匹配（排除误匹配）
     if (resp.func_code != func) {
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    // 拷贝数据
     if (data) {
         size_t copy_len = (resp.data_len > MOTOR_RESPONSE_DATA_MAX)
                           ? MOTOR_RESPONSE_DATA_MAX : resp.data_len;
@@ -240,121 +260,28 @@ esp_err_t motor_read_register(motor_feedback_handle_t handle,
     if (data_len) {
         *data_len = resp.data_len;
     }
-
     return ESP_OK;
-}
-
-esp_err_t motor_feedback_wait_response(motor_feedback_handle_t handle,
-                                       uint8_t expected_func,
-                                       motor_response_t *response,
-                                       uint32_t timeout_ms)
-{
-    if (!handle || !response) return ESP_ERR_INVALID_ARG;
-    motor_feedback_ctx_t *ctx = handle;
-
-    ctx->sync_expected_func = expected_func;
-    ctx->sync_pending       = true;
-
-    esp_err_t ret = ESP_ERR_TIMEOUT;
-    if (xSemaphoreTake(ctx->sync_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
-        *response = ctx->sync_response;
-        ret = ESP_OK;
-    }
-
-    ctx->sync_pending = false;
-    return ret;
-}
-
-esp_err_t motor_feedback_get_response(motor_feedback_handle_t handle,
-                                      motor_response_t *response,
-                                      uint32_t timeout_ms)
-{
-    if (!handle || !response) return ESP_ERR_INVALID_ARG;
-    motor_feedback_ctx_t *ctx = handle;
-
-    if (xQueueReceive(ctx->response_queue, response,
-                      pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
-        return ESP_OK;
-    }
-    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t motor_feedback_register_callback(motor_feedback_handle_t handle,
                                            motor_feedback_callback_t callback,
                                            void *user_ctx)
 {
-    if (!handle) return ESP_ERR_INVALID_ARG;
-    motor_feedback_ctx_t *ctx = handle;
-    ctx->callback     = callback;
-    ctx->callback_ctx = user_ctx;
+    if (!handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    handle->callback     = callback;
+    handle->callback_ctx = user_ctx;
     return ESP_OK;
 }
 
-esp_err_t motor_feedback_flush(motor_feedback_handle_t handle)
-{
-    if (!handle) return ESP_ERR_INVALID_ARG;
-    motor_feedback_ctx_t *ctx = handle;
+/* ------------------------------------------------------------------ RX 接收路径 */
 
-    // 清空内部 RX 缓冲区
-    ctx->rx_buf_len = 0;
-
-    // 清空异步响应队列
-    motor_response_t dummy;
-    while (xQueueReceive(ctx->response_queue, &dummy, 0) == pdTRUE) {}
-
-    return ESP_OK;
-}
-
-int motor_feedback_get_data_len(uint8_t func_code)
-{
-    uint8_t len = _func_data_len[func_code];
-    return (len == 0xFF) ? -1 : (int)len;
-}
-
-uint8_t motor_feedback_calc_checksum(const uint8_t *data, size_t len,
-                                     motor_checksum_type_t type)
-{
-    if (len == 0) return 0;
-
-    switch (type) {
-    case MOTOR_CHECKSUM_6B:
-        return 0x6B;
-
-    case MOTOR_CHECKSUM_XOR: {
-        uint8_t x = data[0];
-        for (size_t i = 1; i < len; i++) x ^= data[i];
-        return x;
-    }
-
-    case MOTOR_CHECKSUM_CRC8: {
-        uint8_t crc = data[0];
-        for (size_t i = 1; i < len; i++) {
-            crc = _crc8_table[crc ^ data[i]];
-        }
-        return crc;
-    }
-
-    default:
-        return 0;
-    }
-}
-
-bool motor_feedback_verify_checksum(const uint8_t *data, size_t len,
-                                    motor_checksum_type_t type)
-{
-    if (len < 2) return false;
-    uint8_t expected = data[len - 1];
-    uint8_t computed = motor_feedback_calc_checksum(data, len - 1, type);
-    return expected == computed;
-}
-
-/* ---- UART 接收回调（来自 uart_comm） ---- */
 static void _uart_rx_callback(const uint8_t *data, size_t len, void *user_ctx)
 {
     motor_feedback_ctx_t *ctx = (motor_feedback_ctx_t *)user_ctx;
 
-    // 追加到内部缓冲区
-    if (ctx->rx_buf_len + len > _RX_BUF_SIZE) {
+    if (ctx->rx_buf_len + len > RX_BUF_SIZE) {
         ESP_LOGW(TAG, "RX buffer overflow, resetting");
         ctx->rx_buf_len = 0;
         return;
@@ -362,175 +289,165 @@ static void _uart_rx_callback(const uint8_t *data, size_t len, void *user_ctx)
     memcpy(ctx->rx_buf + ctx->rx_buf_len, data, len);
     ctx->rx_buf_len += len;
 
-    // 循环提取完整帧
-    while (_try_extract_frame(ctx)) {}
+    while (_try_extract_frame(ctx)) {
+        /* 取出当前缓冲区中所有完整的帧 */
+    }
 }
 
-/* ---- 帧提取 ---- */
-static bool _try_extract_frame(motor_feedback_ctx_t *ctx)
+/** @brief 帧长度标记：数据尚不完整。 */
+#define FRAME_LEN_INCOMPLETE  0
+/** @brief 帧长度标记：帧格式非法。 */
+#define FRAME_LEN_INVALID     ((size_t)-1)
+
+/**
+ * @brief 判断 RX 缓冲区头部帧的长度。
+ *
+ * 寄存器读取帧优先按功能码匹配：其负载长度已知，这样也能避免某个恰好等于
+ * 状态码的负载字节被误判为应答帧。
+ *
+ * @param ctx 协议层上下文
+ * @return 字节长度、FRAME_LEN_INCOMPLETE（需要更多数据）或 FRAME_LEN_INVALID。
+ */
+static size_t _frame_length(motor_feedback_ctx_t *ctx)
 {
-    if (ctx->rx_buf_len < 3) return false;  // 至少需要地址+功能码+1字节
-
-    uint8_t addr      = ctx->rx_buf[0];
-    uint8_t func_code = ctx->rx_buf[1];
-
-    // 地址过滤
-    if (ctx->cfg.listen_addr != 0xFF && addr != ctx->cfg.listen_addr) {
-        memmove(ctx->rx_buf, ctx->rx_buf + 1, ctx->rx_buf_len - 1);
-        ctx->rx_buf_len--;
-        return (ctx->rx_buf_len >= 3);
-    }
-
-    // 判断帧类型：第3字节是否为已知状态码
-    size_t frame_len = 0;
+    uint8_t func  = ctx->rx_buf[1];
     uint8_t third = ctx->rx_buf[2];
 
+    /* 1. 定长寄存器读取应答。 */
+    int fixed = _func_data_len(func);
+    if (fixed >= 0) {
+        return 2 + (size_t)fixed + 1;
+    }
+
+    /* 2. 控制应答：addr + func + status + 校验。 */
     if (third == MOTOR_STATUS_OK ||
         third == MOTOR_STATUS_AT_ZERO ||
         third == MOTOR_STATUS_REACHED ||
         third == MOTOR_STATUS_PARAM_ERR ||
-        third == MOTOR_STATUS_FORMAT_ERR)
-    {
-        // 控制确认帧：地址 + 功能码 + 状态码 + 校验码 = 4 字节
-        frame_len = 4;
-    } else {
-        // 读取返回帧：地址 + 功能码 + 数据 + 校验码
-        int data_len = motor_feedback_get_data_len(func_code);
-        if (data_len >= 0) {
-            frame_len = 2 + (size_t)data_len + 1;
-        } else {
-            // 变长帧处理
-            if (func_code == 0x43 && ctx->rx_buf_len >= 4) {
-                // 系统状态参数：第3字节为“字节数”（从功能码之后开始计数）
-                uint8_t byte_cnt = ctx->rx_buf[2];
-                frame_len = 1 + 1 + byte_cnt + 1;
-            } else if (func_code == 0x42 && ctx->rx_buf_len >= 4) {
-                uint8_t byte_cnt = ctx->rx_buf[2];
-                frame_len = 1 + 1 + byte_cnt + 1;
-            } else if (func_code == 0x49) {
-                // DMX512 参数（估计最大长度）
-                frame_len = 2 + 17 + 1;
-            } else if (func_code == 0x21) {
-                // PID 参数（先尝试 X 固件长度）
-                frame_len = 2 + 16 + 1;
-            } else {
-                // 基于校验码 0x6B 快速定位（仅当校验模式为 0x6B 时可靠）
-                if (ctx->cfg.checksum_type == MOTOR_CHECKSUM_6B) {
-                    size_t pos = 3;
-                    while (pos < ctx->rx_buf_len && pos < _MAX_FRAME_LEN) {
-                        if (ctx->rx_buf[pos] == 0x6B) {
-                            frame_len = pos + 1;
-                            break;
-                        }
-                        pos++;
-                    }
-                    if (pos >= ctx->rx_buf_len || pos >= _MAX_FRAME_LEN)
-                        return false;
-                } else {
-                    // 无法确定长度，丢弃一个字节后重试
-                    memmove(ctx->rx_buf, ctx->rx_buf + 1, ctx->rx_buf_len - 1);
-                    ctx->rx_buf_len--;
-                    return (ctx->rx_buf_len >= 3);
-                }
+        third == MOTOR_STATUS_FORMAT_ERR) {
+        return 4;
+    }
+
+    /* 3. 变长应答：第三个字节是负载长度。 */
+    if (func == 0x42 || func == 0x43) {
+        if (ctx->rx_buf_len < 4) {
+            return FRAME_LEN_INCOMPLETE;
+        }
+        return 2 + (size_t)third + 1;
+    }
+    if (func == 0x49) {
+        return 2 + 17 + 1;
+    }
+    if (func == 0x21) {
+        return 2 + 16 + 1;
+    }
+
+    /* 4. 固定校验回退：扫描 0x6B 结束字节。 */
+    if (ctx->cfg.checksum_type == MOTOR_CHECKSUM_6B) {
+        for (size_t pos = 3; pos < ctx->rx_buf_len; pos++) {
+            if (pos >= MAX_FRAME_LEN) {
+                return FRAME_LEN_INVALID;
+            }
+            if (ctx->rx_buf[pos] == 0x6B) {
+                return pos + 1;
             }
         }
+        return FRAME_LEN_INCOMPLETE;
     }
 
-    if (frame_len == 0 || frame_len > ctx->rx_buf_len) {
-        return false;  // 数据不足
-    }
-    if (frame_len > _MAX_FRAME_LEN) {
-        ESP_LOGW(TAG, "Frame too long (%zu), discarding first byte", frame_len);
-        memmove(ctx->rx_buf, ctx->rx_buf + 1, ctx->rx_buf_len - 1);
-        ctx->rx_buf_len--;
-        return (ctx->rx_buf_len >= 3);
+    /* 未知帧格式：丢弃一个字节以重新同步。 */
+    return FRAME_LEN_INVALID;
+}
+
+static bool _try_extract_frame(motor_feedback_ctx_t *ctx)
+{
+    if (ctx->rx_buf_len < 3) {
+        return false;
     }
 
-    // 校验
-    if (!motor_feedback_verify_checksum(ctx->rx_buf, frame_len,
-                                        ctx->cfg.checksum_type)) {
-        // 校验失败，丢弃首字节重试
-        memmove(ctx->rx_buf, ctx->rx_buf + 1, ctx->rx_buf_len - 1);
-        ctx->rx_buf_len--;
-        return (ctx->rx_buf_len >= 3);
+    /* 地址过滤：跳过无法作为本机帧起始的字节。 */
+    if (ctx->cfg.listen_addr != 0xFF && ctx->rx_buf[0] != ctx->cfg.listen_addr) {
+        return _discard_one_byte(ctx);
     }
 
-    // 提取帧并从缓冲区移除
-    uint8_t frame[_MAX_FRAME_LEN];
+    size_t frame_len = _frame_length(ctx);
+    if (frame_len == FRAME_LEN_INCOMPLETE) {
+        return false;  /* 等待更多字节 */
+    }
+    if (frame_len == FRAME_LEN_INVALID) {
+        return _discard_one_byte(ctx);
+    }
+    if (frame_len > ctx->rx_buf_len) {
+        return false;  /* 帧不完整：等待更多字节 */
+    }
+    if (frame_len > MAX_FRAME_LEN) {
+        ESP_LOGW(TAG, "Frame too long (%zu), dropping byte", frame_len);
+        return _discard_one_byte(ctx);
+    }
+    if (!_verify_checksum(ctx->rx_buf, frame_len, ctx->cfg.checksum_type)) {
+        return _discard_one_byte(ctx);
+    }
+
+    uint8_t frame[MAX_FRAME_LEN];
     memcpy(frame, ctx->rx_buf, frame_len);
     if (ctx->rx_buf_len > frame_len) {
-        memmove(ctx->rx_buf, ctx->rx_buf + frame_len,
-                ctx->rx_buf_len - frame_len);
+        memmove(ctx->rx_buf, ctx->rx_buf + frame_len, ctx->rx_buf_len - frame_len);
     }
     ctx->rx_buf_len -= frame_len;
 
     _process_frame(ctx, frame, frame_len);
-    return (ctx->rx_buf_len >= 3);
+    return ctx->rx_buf_len >= 3;
 }
 
-/* ---- 帧解析与分发 ---- */
 static void _process_frame(motor_feedback_ctx_t *ctx,
                            const uint8_t *frame, size_t frame_len)
 {
     motor_response_t resp;
     memset(&resp, 0, sizeof(resp));
-    resp.addr      = frame[0];
-    resp.func_code = frame[1];
-    resp.data_len  = (uint8_t)(frame_len - 3);
+    resp.addr         = frame[0];
+    resp.func_code    = frame[1];
+    resp.data_len     = (uint8_t)(frame_len - 3);
     resp.timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
     if (resp.data_len > MOTOR_RESPONSE_DATA_MAX) {
         resp.data_len = MOTOR_RESPONSE_DATA_MAX;
     }
     memcpy(resp.data, frame + 2, resp.data_len);
-    uint8_t third = (resp.data_len >= 1) ? resp.data[0] : 0;
-    // 控制确认帧必须是 4 字节且数据长度 == 1
-    //（数据读取帧通常数据长度 > 1，或通过 func_code 区分）
-    bool is_control_confirm = (frame_len == 4 && resp.data_len == 1);
+
+    uint8_t third = resp.data[0];
+    /* 携带状态码的 4 字节帧属于应答帧，但仅限命令类功能码——
+     * 单字节寄存器读取具有相同的帧形状。 */
+    bool is_control_confirm = (_func_data_len(resp.func_code) < 0) &&
+                              (frame_len == 4 && resp.data_len == 1);
     if (is_control_confirm &&
         (third == MOTOR_STATUS_OK ||
          third == MOTOR_STATUS_AT_ZERO ||
          third == MOTOR_STATUS_REACHED ||
          third == MOTOR_STATUS_PARAM_ERR ||
-         third == MOTOR_STATUS_FORMAT_ERR))
-    {
+         third == MOTOR_STATUS_FORMAT_ERR)) {
         resp.status = third;
-        // 到位/回零等主动上报标记
         if (third == MOTOR_STATUS_REACHED) {
             resp.is_notification = true;
         }
     }
-    // 定时返回等主动上报（功能码 0x24~0x3D 且数据长度 ≥ 2）
-    if (!resp.is_notification &&
-        resp.func_code >= 0x24 && resp.func_code <= 0x3D &&
-        resp.data_len >= 2) {  // 至少包含状态字节
-        resp.is_notification = true;
-        }
-    ESP_LOGD(TAG, "Frame: addr=0x%02X func=0x%02X status=0x%02X notify=%d",
+
+    /* 0x9F 应答是本项目使用的唯一非请求事件：
+     * 它表示“运动完成”，绝不能被漏掉。 */
+    if (resp.status != MOTOR_STATUS_REACHED) {
+        resp.is_notification = false;
+    }
+
+    ESP_LOGD(TAG, "Frame addr=0x%02X func=0x%02X status=0x%02X notify=%d",
              resp.addr, resp.func_code, resp.status, resp.is_notification);
 
-    // 1. 同步等待处理
-    if (ctx->sync_pending) {
-        if (ctx->sync_expected_func == 0x00 ||
-            ctx->sync_expected_func == resp.func_code) {
-            ctx->sync_response = resp;
-            ctx->sync_pending = false;
-            xSemaphoreGive(ctx->sync_sem);
-            // 同时放入异步队列
-            xQueueSend(ctx->response_queue, &resp, 0);
-            return;
-        }
-        // 非期望的功能码也放入异步队列，但不触发信号量
+    /* 优先投递给正在等待的同步交换。 */
+    if (ctx->sync_pending &&
+        (ctx->sync_expected_func == 0x00 || ctx->sync_expected_func == resp.func_code)) {
+        ctx->sync_response = resp;
+        ctx->sync_pending  = false;
+        xSemaphoreGive(ctx->sync_sem);
     }
 
-    // 2. 放入异步队列
-    if (xQueueSend(ctx->response_queue, &resp, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Response queue full, dropping frame");
-    }
-
-    // 3. 触发用户回调（主动上报）
     if (resp.is_notification && ctx->callback) {
         ctx->callback(&resp, ctx->callback_ctx);
     }
 }
-
-

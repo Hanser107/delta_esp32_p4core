@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="650" viewBox="0 0 900 650"
+     font-family="Noto Sans CJK SC, Source Han Sans SC, Microsoft YaHei, DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="450" y="40" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">图 1  Delta 并联机器人结构示意</text>
+
+  <!-- 固定平台（基座） -->
+  <ellipse cx="450" cy="150" rx="180" ry="52" fill="#dbeafe" stroke="#1e40af" stroke-width="2.5"/>
+  <text x="450" y="156" text-anchor="middle" font-size="16" fill="#1e3a8a">固定平台（基座）</text>
+
+  <!-- 三个驱动电机 -->
+  <rect x="586" y="168" width="34" height="26" rx="5" fill="#1e40af"/>
+  <rect x="280" y="168" width="34" height="26" rx="5" fill="#1e40af"/>
+  <rect x="433" y="96" width="34" height="26" rx="5" fill="#1e40af"/>
+  <text x="632" y="188" font-size="15" fill="#1e3a8a">M1</text>
+  <text x="252" y="188" font-size="15" fill="#1e3a8a">M2</text>
+  <text x="474" y="104" font-size="15" fill="#1e3a8a">M3</text>
+
+  <!-- 主动臂（上臂，电机直接驱动） -->
+  <line x1="603" y1="181" x2="726" y2="330" stroke="#2563eb" stroke-width="10" stroke-linecap="round"/>
+  <line x1="297" y1="181" x2="174" y2="330" stroke="#2563eb" stroke-width="10" stroke-linecap="round"/>
+  <line x1="450" y1="109" x2="450" y2="252" stroke="#2563eb" stroke-width="10" stroke-linecap="round"/>
+  <text x="700" y="250" font-size="16" fill="#1d4ed8">主动臂 L</text>
+  <text x="700" y="270" font-size="13" fill="#1d4ed8">（转动副，电机驱动）</text>
+
+  <!-- 从动臂（平行四边形连杆） -->
+  <line x1="726" y1="330" x2="522" y2="500" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+  <line x1="174" y1="330" x2="378" y2="500" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+  <line x1="450" y1="252" x2="450" y2="462" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+  <text x="120" y="400" font-size="16" fill="#b45309">从动臂 La</text>
+  <text x="120" y="420" font-size="13" fill="#b45309">（平行四边形，两端球铰）</text>
+
+  <!-- 关节 -->
+  <circle cx="726" cy="330" r="8" fill="#ffffff" stroke="#374151" stroke-width="2.5"/>
+  <circle cx="174" cy="330" r="8" fill="#ffffff" stroke="#374151" stroke-width="2.5"/>
+  <circle cx="450" cy="252" r="8" fill="#ffffff" stroke="#374151" stroke-width="2.5"/>
+
+  <!-- 动平台 -->
+  <ellipse cx="450" cy="486" rx="95" ry="30" fill="#dcfce7" stroke="#15803d" stroke-width="2.5"/>
+  <text x="450" y="492" text-anchor="middle" font-size="15" fill="#14532d">动平台</text>
+
+  <!-- 末端执行器 -->
+  <line x1="450" y1="516" x2="450" y2="548" stroke="#15803d" stroke-width="4"/>
+  <polygon points="450,572 434,548 466,548" fill="#15803d"/>
+  <text x="482" y="566" font-size="15" fill="#14532d">末端执行器</text>
+  <text x="482" y="586" font-size="13" fill="#14532d">（夹爪 / 真空吸盘）</text>
+
+  <!-- Z 轴 -->
+  <line x1="660" y1="120" x2="660" y2="600" stroke="#374151" stroke-width="1.8" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+  <text x="672" y="360" font-size="16" fill="#374151">Z</text>
+  <text x="672" y="382" font-size="13" fill="#374151">向下为负</text>
+
+  <!-- 自由度说明 -->
+  <text x="60" y="66" font-size="15" fill="#374151">三条相同支链互成 120°，只做三平移运动</text>
+  <text x="60" y="90" font-size="15" fill="#374151">（X / Y / Z），动平台姿态保持不变。</text>
+</svg>

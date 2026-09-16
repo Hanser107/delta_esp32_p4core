@@ -1,21 +1,27 @@
-# This file was generated using idf.py save-defconfig. It can be edited manually.
-# Espressif IoT Development Framework (ESP-IDF) 5.5.0 Project Minimal Configuration
+# Delta 机器人控制器 —— 最小化工程配置。
+# 修改 menuconfig 选项后可用 `idf.py save-defconfig` 重新生成本文件。
 #
+# 适用硬件：ESP32-P4 + WT99P4C5-S1（16 MB Flash，32 MB PSRAM）
+
+# ---------------------------------------------------------------- 目标芯片 / Flash
 CONFIG_IDF_TARGET="esp32p4"
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_EXAMPLE_LVGL_PORT_TASK_STACK_SIZE_KB=10
-CONFIG_EXAMPLE_LVGL_PORT_AVOID_TEAR_ENABLE=y
-CONFIG_EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE_4=y
-CONFIG_EXAMPLE_LVGL_FPS_STATS_ENABLE=y
+CONFIG_SPI_FLASH_SUPPORT_GD_CHIP=n
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+
+# ---------------------------------------------------------------- 性能优化
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_FREERTOS_HZ=1000
+
+# ---------------------------------------------------------------- PSRAM / 缓存
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 CONFIG_CACHE_L2_CACHE_256KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
-CONFIG_FREERTOS_HZ=1000
-CONFIG_SPI_FLASH_SUPPORT_GD_CHIP=n
+
+# ---------------------------------------------------------------- LVGL 图形库
 CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
 CONFIG_LV_USE_CLIB_SPRINTF=y
@@ -23,17 +29,28 @@ CONFIG_LV_DEF_REFR_PERIOD=16
 CONFIG_LV_USE_LOG=y
 CONFIG_LV_LOG_PRINTF=y
 CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
+CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
-CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_TXT_BREAK_CHARS=" ,.;:-_"
-CONFIG_LV_USE_SNAPSHOT=y
-CONFIG_LV_USE_SYSMON=y
-CONFIG_LV_USE_PERF_MONITOR=y
-CONFIG_LV_USE_IMGFONT=y
-CONFIG_LV_USE_DEMO_BENCHMARK=y
-CONFIG_LV_USE_DEMO_STRESS=y
-CONFIG_LV_USE_DEMO_MUSIC=y
-CONFIG_LV_DEMO_MUSIC_AUTO_PLAY=y
-CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+
+# ---------------------------------------------------------------- 板载显示屏
 CONFIG_BSP_LCD_DPI_BUFFER_NUMS=2
+
+# ---------------------------------------------------------------- 板载无线协处理器
+# WT99P4C5-S1 板载的协处理器是 ESP32-C5（不是 C6），必须显式选择，
+# 否则会落到组件默认的 C6，导致 Wi-Fi 无法启动。
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C5=y
+
+# ---------------------------------------------------------------- PSRAM 堆分配
+# 与旧工程 menuconfig 中已验证的取值保持一致（内部堆保留量等）。
+CONFIG_ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=8192
+
+# ---------------------------------------------------------------- 应用层配置
+# app_wifi 组件使用的 Wi-Fi 站点凭据（对应其 Kconfig 菜单）。
+CONFIG_DELTA_WIFI_SSID="nagatoYuki"
+CONFIG_DELTA_WIFI_PASSWORD="nagatoYuki"

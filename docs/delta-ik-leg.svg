@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="680" viewBox="0 0 980 680"
+     font-family="Noto Sans CJK SC, Source Han Sans SC, Microsoft YaHei, DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="a3" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="490" y="38" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">图 3  单条支链的平面几何与逆运动学求解</text>
+
+  <!-- 坐标系 -->
+  <line x1="110" y1="190" x2="700" y2="190" stroke="#374151" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a3)"/>
+  <text x="706" y="196" font-size="15" fill="#374151">径向 p</text>
+  <line x1="110" y1="90" x2="110" y2="530" stroke="#374151" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a3)"/>
+  <text x="120" y="526" font-size="15" fill="#374151">Z（向下为负）</text>
+  <circle cx="110" cy="190" r="4.5" fill="#374151"/>
+  <text x="70" y="182" font-size="15" fill="#374151">O</text>
+
+  <!-- 辅助虚线 -->
+  <line x1="437" y1="136" x2="110" y2="136" stroke="#9ca3af" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <line x1="291" y1="440" x2="110" y2="440" stroke="#9ca3af" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <line x1="291" y1="440" x2="291" y2="190" stroke="#9ca3af" stroke-width="1.2" stroke-dasharray="5 4"/>
+
+  <!-- 基座平面 -->
+  <line x1="70" y1="190" x2="640" y2="190" stroke="#1e40af" stroke-width="2.4"/>
+  <text x="560" y="182" font-size="14" fill="#1e40af">固定平台平面（Z = 0）</text>
+
+  <!-- 主动臂 A->E -->
+  <line x1="212" y1="190" x2="437" y2="136" stroke="#2563eb" stroke-width="9" stroke-linecap="round"/>
+  <!-- 从动臂 E->B -->
+  <line x1="437" y1="136" x2="291" y2="440" stroke="#f59e0b" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- 关节 -->
+  <circle cx="212" cy="190" r="8" fill="#ffffff" stroke="#1e40af" stroke-width="3"/>
+  <circle cx="437" cy="136" r="8" fill="#ffffff" stroke="#374151" stroke-width="3"/>
+  <circle cx="291" cy="440" r="8" fill="#ffffff" stroke="#15803d" stroke-width="3"/>
+
+  <!-- 半径 Ru 尺寸线 -->
+  <line x1="110" y1="168" x2="212" y2="168" stroke="#1e40af" stroke-width="1.3"/>
+  <line x1="110" y1="162" x2="110" y2="174" stroke="#1e40af" stroke-width="1.3"/>
+  <line x1="212" y1="162" x2="212" y2="174" stroke="#1e40af" stroke-width="1.3"/>
+  <text x="161" y="160" text-anchor="middle" font-size="14" fill="#1e40af">Ru</text>
+
+  <!-- 角度弧 -->
+  <path d="M 282 190 A 70 70 0 0 0 280 174" fill="none" stroke="#dc2626" stroke-width="2"/>
+  <text x="300" y="182" font-size="15" fill="#dc2626">θ</text>
+
+  <!-- 标注 -->
+  <text x="300" y="118" font-size="15" fill="#1d4ed8">主动臂 L = 185</text>
+  <text x="392" y="300" font-size="15" fill="#b45309">从动臂 La = 270</text>
+  <text x="126" y="140" font-size="14" fill="#6b7280">−L·sin θ</text>
+  <text x="150" y="464" font-size="14" fill="#6b7280">p + Rl = 145</text>
+  <text x="300" y="330" font-size="14" fill="#6b7280">z = −200</text>
+  <text x="304" y="462" font-size="14" fill="#15803d">动平台铰点 B</text>
+  <text x="122" y="222" font-size="14" fill="#6b7280">固定平台铰点 A</text>
+  <text x="452" y="130" font-size="14" fill="#6b7280">肘点 E</text>
+
+  <!-- 公式区 -->
+  <rect x="40" y="548" width="900" height="118" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="60" y="576" font-size="15" fill="#0f172a">几何约束（第 i 条支链，pᵢ = x·cos φᵢ + y·sin φᵢ，Rd = Ru − Rl）：</text>
+  <text x="60" y="602" font-size="16" fill="#0f172a">(Rd + L·cos θᵢ − pᵢ)² + (L·sin θᵢ + z)² = La²</text>
+  <text x="60" y="628" font-size="15" fill="#0f172a">半角代换 t = tan(θᵢ/2) 后化为： (A+B)·t² + 2C·t + (A−B) = 0，θᵢ = 2·atan(t)</text>
+  <text x="60" y="652" font-size="14" fill="#475569">其中 A = (x²+y²+z²+L²−La²+Rd²−2·pᵢ·Rd)/(2L)，B = pᵢ−Rd，C = z；取 t = (−U−√(U²−4KV))/(2K) 分支（肘部朝外解）。</text>
+</svg>
