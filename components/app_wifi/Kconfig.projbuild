@@ -1,0 +1,15 @@
+menu "Delta 应用配置"
+
+    config DELTA_WIFI_SSID
+        string "Wi-Fi 名称（SSID）"
+        default "nagatoYuki"
+        help
+            设备上电后要接入的无线网络名称。
+
+    config DELTA_WIFI_PASSWORD
+        string "Wi-Fi 密码"
+        default "nagatoYuki"
+        help
+            上述无线网络的密码。
+
+endmenu

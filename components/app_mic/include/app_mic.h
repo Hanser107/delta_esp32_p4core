@@ -8,4 +8,4 @@
  *
  * @return ESP_OK 成功，其他值失败
  */
-esp_err_t mic_test_start(void);
+esp_err_t inmp441_mic_start(void);

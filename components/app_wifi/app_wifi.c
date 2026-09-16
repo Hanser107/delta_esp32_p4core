@@ -53,7 +53,7 @@ static void ESP_WIFI_Event_CallBack(void* event_handler_arg,\
                 esp_err_t ret =  http_server_start();
                 if(ret == ESP_OK) {
                     ESP_LOGI(TAG,"HTTP server started");
-                    pattern_player_init();
+                    //pattern_player_init();
                     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
                     pattern_player_init();
                     ESP_LOGI(TAG, "========================================");

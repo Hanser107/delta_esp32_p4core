@@ -5,6 +5,7 @@
 #include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 static const char *TAG = "http_server";
 
@@ -26,7 +27,6 @@ static const char INDEX_HTML[] = R"raw(
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Delta Robot Draw</title>
 <style>
-/* 全局 */
 *{margin:0;padding:0;box-sizing:border-box;}
 body{
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
@@ -40,8 +40,6 @@ h1{
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;
   background-clip:text;letter-spacing:1px;
 }
-
-/* 卡片 */
 .card{
   background: rgba(22,33,62,0.85);backdrop-filter:blur(10px);
   border:1px solid rgba(233,69,96,0.3);
@@ -49,8 +47,6 @@ h1{
   width:100%;max-width:440px;
   box-shadow:0 8px 32px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(255,255,255,0.05);
 }
-
-/* 画布容器 */
 canvas{
   display:block;margin:0 auto;
   border:2px solid rgba(233,69,96,0.4);
@@ -61,8 +57,6 @@ canvas{
   transition:box-shadow 0.3s;
 }
 canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
-
-/* 参数控件 */
 .controls{
   display:flex;flex-wrap:wrap;gap:10px;align-items:center;
 }
@@ -70,7 +64,6 @@ canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
   font-size:0.9em;color:#aaa;min-width:70px;
   display:flex;align-items:center;gap:6px;
 }
-.controls label i{font-style:normal;font-size:1.2em;}
 .controls input[type=range]{
   flex:1;min-width:100px;
   -webkit-appearance:none;appearance:none;
@@ -89,8 +82,6 @@ canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;
   background-clip:text;font-weight:bold;
 }
-
-/* 按钮区域 */
 .btn-row{display:flex;gap:10px;margin-top:10px;}
 .btn{
   flex:1;padding:12px;border:none;border-radius:10px;
@@ -120,8 +111,6 @@ canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
   background:linear-gradient(135deg, #f39c12, #e67e22);
   color:#000;box-shadow:0 4px 15px rgba(243,156,18,0.4);
 }
-
-/* 状态指示 */
 #status{
   text-align:center;padding:10px;margin-top:10px;
   border-radius:10px;font-size:0.95em;font-weight:bold;
@@ -133,11 +122,18 @@ canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
 .status-sending{background:rgba(243,156,18,0.2);color:#f1c40f;border:1px solid #f39c12;}
 .status-playing{background:rgba(142,68,173,0.2);color:#9b59b6;border:1px solid #8e44ad;}
 .status-error{background:rgba(231,76,60,0.2);color:#e74c3c;border:1px solid #c0392b;}
-
 .coord-info{
   font-size:0.75em;color:#aaa;text-align:center;margin-top:6px;
   opacity:0.8;letter-spacing:0.5px;
 }
+.stroke-indicator{
+  display:flex;justify-content:center;gap:8px;margin-top:8px;flex-wrap:wrap;
+}
+.stroke-dot{
+  width:8px;height:8px;border-radius:50%;background:#e94560;
+  opacity:0.6;transition:all 0.3s;
+}
+.stroke-dot.active{opacity:1;background:#f39c12;box-shadow:0 0 8px #f39c12;}
 </style>
 </head>
 <body>
@@ -146,7 +142,8 @@ canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
 
 <div class="card">
   <canvas id="cv" width="380" height="380"></canvas>
-  <div class="coord-info">工作空间：&#x3A6;200mm 圆 | 圆心 = Delta(0,0) | Z 固定 -200.0 mm</div>
+  <div class="coord-info">工作空间：&#x3A6;200mm 圆 | 圆心 = Delta(0,0) | 绘制 Z=-200 | 抬笔 Z=-140</div>
+  <div class="stroke-indicator" id="strokeDots"></div>
 </div>
 
 <div class="card">
@@ -170,7 +167,7 @@ canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
   <div class="btn-row" style="margin-top:6px;">
     <button class="btn btn-abort" onclick="abortPattern()">&#x23F9; 中止</button>
   </div>
-  <div id="status" class="status-idle">&#x2705; 就绪 &mdash; 在圆内绘制</div>
+  <div id="status" class="status-idle">&#x2705; 就绪 &mdash; 在圆内绘制（支持多笔划）</div>
 </div>
 
 <script>
@@ -178,24 +175,31 @@ canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
 const W = cv.width, H = cv.height;
-const CX = W/2, CY = H/2;     // 圆心 (190,190)
-const RADIUS = 175;           // 半径 175px，占满画布
-const SCALE_MM = 200.0;       // 固定缩放：圆半径对应 200mm 工作空间
+const CX = W/2, CY = H/2;
+const RADIUS = 175;
+const SCALE_MM = 200.0;
+const SAMPLE_DIST = 4;
 
 let isDrawing = false;
-let rawPoints = [];           // {cx, cy}
+let strokes = [];            // strokes[strokeIdx] = [{cx,cy}, ...]
+let currentStrokeIdx = -1;   // 当前正在绘制的笔划索引
 let lastSampleX = null, lastSampleY = null;
-const SAMPLE_DIST = 4;        // 采样间距（像素）
+
+// 笔划颜色表
+const STROKE_COLORS = [
+  '#e94560','#f39c12','#3498db','#2ecc71','#9b59b6',
+  '#1abc9c','#e74c3c','#2980b9','#f1c40f','#e67e22'
+];
 
 function initCanvas(){
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle='#fff';
   ctx.fillRect(0,0,W,H);
 
-  // 网格：10px 间隔，原点精确落在交点上
+  // 网格
   ctx.strokeStyle='#e8e8e8';
   ctx.lineWidth=0.5;
-  for(let i=10; i<W; i+=10){
+  for(let i=10;i<W;i+=10){
     ctx.beginPath();ctx.moveTo(i,0);ctx.lineTo(i,H);ctx.stroke();
     ctx.beginPath();ctx.moveTo(0,i);ctx.lineTo(W,i);ctx.stroke();
   }
@@ -203,21 +207,19 @@ function initCanvas(){
   // 坐标轴
   ctx.strokeStyle='#777';
   ctx.lineWidth=1.2;
-  ctx.beginPath();
-  ctx.moveTo(10, CY);ctx.lineTo(W-10, CY); ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(CX, 10);ctx.lineTo(CX, H-10); ctx.stroke();
+  ctx.beginPath();ctx.moveTo(10,CY);ctx.lineTo(W-10,CY);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(CX,10);ctx.lineTo(CX,H-10);ctx.stroke();
 
   // 箭头
   ctx.fillStyle='#777';
-  ctx.beginPath();ctx.moveTo(CX+RADIUS+3, CY);ctx.lineTo(CX+RADIUS-5, CY-5);ctx.lineTo(CX+RADIUS-5, CY+5);ctx.fill();
-  ctx.beginPath();ctx.moveTo(CX, CY-RADIUS-3);ctx.lineTo(CX-5, CY-RADIUS+5);ctx.lineTo(CX+5, CY-RADIUS+5);ctx.fill();
+  ctx.beginPath();ctx.moveTo(CX+RADIUS+3,CY);ctx.lineTo(CX+RADIUS-5,CY-5);ctx.lineTo(CX+RADIUS-5,CY+5);ctx.fill();
+  ctx.beginPath();ctx.moveTo(CX,CY-RADIUS-3);ctx.lineTo(CX-5,CY-RADIUS+5);ctx.lineTo(CX+5,CY-RADIUS+5);ctx.fill();
   ctx.font='bold 13px "Segoe UI", sans-serif';
   ctx.fillStyle='#444';
   ctx.fillText('X', CX+RADIUS-5, CY-8);
   ctx.fillText('Y', CX+10, CY-RADIUS+15);
 
-  // 工作空间圆（红色高亮）
+  // 工作空间圆
   const grad = ctx.createLinearGradient(0,0,W,H);
   grad.addColorStop(0,'#e94560');
   grad.addColorStop(0.5,'#f39c12');
@@ -236,6 +238,37 @@ function initCanvas(){
   ctx.fillStyle='#000';
   ctx.font='bold 14px sans-serif';
   ctx.fillText('O', CX+8, CY-8);
+
+  // 重绘已有笔划
+  redrawAllStrokes();
+}
+
+function redrawAllStrokes(){
+  for(let s=0; s<strokes.length; s++){
+    const pts = strokes[s];
+    const color = STROKE_COLORS[s % STROKE_COLORS.length];
+    if(pts.length < 1) continue;
+    // 起点圆点
+    ctx.fillStyle=color;
+    ctx.beginPath();ctx.arc(pts[0].cx, pts[0].cy, 3, 0, Math.PI*2);ctx.fill();
+    // 连线
+    ctx.strokeStyle=color;
+    ctx.lineWidth=2;
+    ctx.lineCap='round';ctx.lineJoin='round';
+    ctx.beginPath();
+    ctx.moveTo(pts[0].cx, pts[0].cy);
+    for(let i=1;i<pts.length;i++){
+      ctx.lineTo(pts[i].cx, pts[i].cy);
+    }
+    ctx.stroke();
+    // 终点圆点
+    if(pts.length>1){
+      ctx.fillStyle=color;
+      ctx.beginPath();
+      ctx.arc(pts[pts.length-1].cx, pts[pts.length-1].cy, 3, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
 }
 
 function isInsideCircle(cx, cy){
@@ -245,30 +278,23 @@ function isInsideCircle(cx, cy){
 
 function getPos(e){
   const rect = cv.getBoundingClientRect();
-  const sx = W / rect.width;
-  const sy = H / rect.height;
+  const sx = W / rect.width, sy = H / rect.height;
   if(e.touches){
-    return {x: (e.touches[0].clientX-rect.left)*sx, y: (e.touches[0].clientY-rect.top)*sy};
+    return {x:(e.touches[0].clientX-rect.left)*sx, y:(e.touches[0].clientY-rect.top)*sy};
   }
-  return {x: (e.clientX-rect.left)*sx, y: (e.clientY-rect.top)*sy};
+  return {x:(e.clientX-rect.left)*sx, y:(e.clientY-rect.top)*sy};
 }
 
-function addPoint(cx, cy){
-  if(lastSampleX !== null){
-    const dx = cx - lastSampleX, dy = cy - lastSampleY;
-    if(Math.sqrt(dx*dx+dy*dy) < SAMPLE_DIST) return;
+function updateStrokeDots(){
+  const container = document.getElementById('strokeDots');
+  container.innerHTML = '';
+  for(let i=0;i<strokes.length;i++){
+    const dot = document.createElement('span');
+    dot.className = 'stroke-dot';
+    if(i===currentStrokeIdx) dot.classList.add('active');
+    dot.title = '笔划'+(i+1)+' ('+strokes[i].length+'点)';
+    container.appendChild(dot);
   }
-  rawPoints.push({cx, cy});
-  lastSampleX = cx; lastSampleY = cy;
-  ctx.fillStyle='rgba(233,69,96,0.8)';
-  ctx.beginPath();ctx.arc(cx,cy,2,0,Math.PI*2);ctx.fill();
-}
-
-function drawLine(x0,y0,x1,y1){
-  ctx.strokeStyle='rgba(50,50,50,0.7)';
-  ctx.lineWidth=2.5;
-  ctx.lineCap='round';ctx.lineJoin='round';
-  ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.stroke();
 }
 
 // 鼠标事件
@@ -277,30 +303,50 @@ cv.addEventListener('mousedown', e => {
   const p = getPos(e);
   if(!isInsideCircle(p.x, p.y)) return;
   isDrawing = true;
+  // 创建新笔划
+  strokes.push([{cx:p.x, cy:p.y}]);
+  currentStrokeIdx = strokes.length - 1;
   lastSampleX = p.x; lastSampleY = p.y;
-  rawPoints = [{cx:p.x, cy:p.y}];
-  ctx.fillStyle='rgba(233,69,96,0.8)';
-  ctx.beginPath();ctx.arc(p.x,p.y,2,0,Math.PI*2);ctx.fill();
-  setStatus('drawing','&#x270F; 绘制中...');
+  updateStrokeDots();
+  setStatus('drawing','&#x270F; 绘制中... 笔划 '+strokes.length);
 });
 cv.addEventListener('mousemove', e => {
   if(!isDrawing) return;
   e.preventDefault();
   const p = getPos(e);
   if(!isInsideCircle(p.x, p.y)) return;
-  drawLine(lastSampleX,lastSampleY,p.x,p.y);
-  addPoint(p.x,p.y);
+  if(lastSampleX!==null){
+    const dx = p.x - lastSampleX, dy = p.y - lastSampleY;
+    if(Math.sqrt(dx*dx+dy*dy) < SAMPLE_DIST) return;
+  }
+  strokes[currentStrokeIdx].push({cx:p.x, cy:p.y});
+  lastSampleX = p.x; lastSampleY = p.y;
+  // 实时绘制当前笔划
+  const pts = strokes[currentStrokeIdx];
+  const color = STROKE_COLORS[currentStrokeIdx % STROKE_COLORS.length];
+  ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.beginPath();ctx.moveTo(pts[pts.length-2].cx, pts[pts.length-2].cy);
+  ctx.lineTo(p.x, p.y);ctx.stroke();
+  ctx.fillStyle=color;
+  ctx.beginPath();ctx.arc(p.x,p.y,1.5,0,Math.PI*2);ctx.fill();
 });
 cv.addEventListener('mouseup', () => {
+  if(!isDrawing) return;
   isDrawing = false;
-  setStatus('idle','&#x2705; 就绪 - 共 '+rawPoints.length+' 点');
+  const totalPts = strokes.reduce((sum,s)=>sum+s.length, 0);
+  setStatus('idle','&#x2705; 就绪 - '+strokes.length+' 笔划, 共 '+totalPts+' 点');
   lastSampleX=null;lastSampleY=null;
+  currentStrokeIdx = -1;
+  updateStrokeDots();
 });
 cv.addEventListener('mouseleave', () => {
   if(isDrawing){
     isDrawing = false;
-    setStatus('idle','&#x2705; 就绪 - 共 '+rawPoints.length+' 点');
+    const totalPts = strokes.reduce((sum,s)=>sum+s.length, 0);
+    setStatus('idle','&#x2705; 就绪 - '+strokes.length+' 笔划, 共 '+totalPts+' 点');
     lastSampleX=null;lastSampleY=null;
+    currentStrokeIdx = -1;
+    updateStrokeDots();
   }
 });
 
@@ -310,24 +356,37 @@ cv.addEventListener('touchstart', e => {
   const p = getPos(e);
   if(!isInsideCircle(p.x, p.y)) return;
   isDrawing = true;
+  strokes.push([{cx:p.x, cy:p.y}]);
+  currentStrokeIdx = strokes.length - 1;
   lastSampleX = p.x; lastSampleY = p.y;
-  rawPoints = [{cx:p.x, cy:p.y}];
-  ctx.fillStyle='rgba(233,69,96,0.8)';
-  ctx.beginPath();ctx.arc(p.x,p.y,2,0,Math.PI*2);ctx.fill();
-  setStatus('drawing','&#x270F; 绘制中...');
+  updateStrokeDots();
+  setStatus('drawing','&#x270F; 绘制中... 笔划 '+strokes.length);
 },{passive:false});
 cv.addEventListener('touchmove', e => {
   if(!isDrawing) return;
   e.preventDefault();
   const p = getPos(e);
   if(!isInsideCircle(p.x, p.y)) return;
-  drawLine(lastSampleX,lastSampleY,p.x,p.y);
-  addPoint(p.x,p.y);
+  if(lastSampleX!==null){
+    const dx = p.x - lastSampleX, dy = p.y - lastSampleY;
+    if(Math.sqrt(dx*dx+dy*dy) < SAMPLE_DIST) return;
+  }
+  strokes[currentStrokeIdx].push({cx:p.x, cy:p.y});
+  lastSampleX = p.x; lastSampleY = p.y;
+  const pts = strokes[currentStrokeIdx];
+  const color = STROKE_COLORS[currentStrokeIdx % STROKE_COLORS.length];
+  ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.beginPath();ctx.moveTo(pts[pts.length-2].cx, pts[pts.length-2].cy);
+  ctx.lineTo(p.x, p.y);ctx.stroke();
 },{passive:false});
 cv.addEventListener('touchend', () => {
+  if(!isDrawing) return;
   isDrawing = false;
-  setStatus('idle','&#x2705; 就绪 - 共 '+rawPoints.length+' 点');
+  const totalPts = strokes.reduce((sum,s)=>sum+s.length, 0);
+  setStatus('idle','&#x2705; 就绪 - '+strokes.length+' 笔划, 共 '+totalPts+' 点');
   lastSampleX=null;lastSampleY=null;
+  currentStrokeIdx = -1;
+  updateStrokeDots();
 });
 
 // ==================== 控件绑定 ====================
@@ -340,7 +399,6 @@ bindSlider('accelVal','accelDisp');
 
 // ==================== 坐标映射 ====================
 function pixelToMM(cx, cy){
-  // X: 右为正，Y: 上为正，圆心对应 (0,0)
   const x = (cx - CX) * (SCALE_MM / RADIUS);
   const y = -(cy - CY) * (SCALE_MM / RADIUS);
   return {x, y};
@@ -348,7 +406,8 @@ function pixelToMM(cx, cy){
 
 // ==================== 发送图案 ====================
 async function sendPattern(){
-  if(rawPoints.length < 2){
+  const totalPts = strokes.reduce((sum,s)=>sum+s.length, 0);
+  if(totalPts < 2){
     setStatus('error','&#x26A0; 至少需要2个点');
     return;
   }
@@ -356,15 +415,18 @@ async function sendPattern(){
   const accel = parseInt(document.getElementById('accelVal').value);
   const btn = document.getElementById('btnSend');
   btn.disabled = true;
-  setStatus('sending','&#x1F4E4; 发送中 ('+rawPoints.length+' 点) ...');
+  setStatus('sending','&#x1F4E4; 发送中 ('+strokes.length+'笔划, '+totalPts+'点) ...');
 
-  const mmPoints = rawPoints.map(p => {
-    const m = pixelToMM(p.cx, p.cy);
-    return [Math.round(m.x*10)/10, Math.round(m.y*10)/10];
+  // 转成三维数组: [[[x,y],[x,y],...], [[x,y],...]]
+  const strokeData = strokes.map(stroke => {
+    return stroke.map(p => {
+      const m = pixelToMM(p.cx, p.cy);
+      return [Math.round(m.x*10)/10, Math.round(m.y*10)/10];
+    });
   });
 
   const payload = {
-    points: mmPoints,
+    strokes: strokeData,
     z: -200.0,
     speed: speed,
     accel: accel
@@ -378,7 +440,7 @@ async function sendPattern(){
     });
     const result = await resp.json();
     if(result.success){
-      setStatus('playing','&#x25B6; 播放中 - '+result.point_count+' 点');
+      setStatus('playing','&#x25B6; 播放中 - '+result.point_count+'点, '+result.stroke_count+'笔划');
     } else {
       setStatus('error','&#x274C; 错误: '+(result.error||'未知'));
     }
@@ -396,9 +458,11 @@ function abortPattern(){
 }
 
 function clearCanvas(){
-  rawPoints=[];
+  strokes=[];
   lastSampleX=null;lastSampleY=null;
+  currentStrokeIdx=-1;
   initCanvas();
+  updateStrokeDots();
   setStatus('idle','&#x2705; 就绪 - 已清除');
 }
 
@@ -413,7 +477,6 @@ initCanvas();
 </body>
 </html>
 )raw";
-
 /* ================================================================
  *  HTTP 请求处理器
  * ================================================================ */
@@ -451,12 +514,11 @@ static esp_err_t abort_post_handler(httpd_req_t *req)
 }
 
 
-/* POST /api/points → 接收图案点集 */
+/* POST /api/points → 接收图案点集（支持多笔划） */
 static esp_err_t points_post_handler(httpd_req_t *req)
 {
     int total_len = req->content_len;
 
-    /* ---- 1. 校验 Content-Length ---- */
     if (total_len <= 0 || total_len > 65536) {
         const char *err = "{\"success\":false,\"error\":\"payload too large or empty\"}";
         httpd_resp_set_type(req, "application/json");
@@ -464,22 +526,18 @@ static esp_err_t points_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    /* ---- 2. 动态分配缓冲区（避免栈溢出） ---- */
     char *body_buf = malloc(total_len + 1);
     if (!body_buf) {
-        ESP_LOGE(TAG, "malloc(%d) failed", total_len + 1);
         const char *err = "{\"success\":false,\"error\":\"server out of memory\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
-    /* ---- 3. 分块接收 Body ---- */
     int received = 0;
     while (received < total_len) {
         int ret = httpd_req_recv(req, body_buf + received, total_len - received);
         if (ret <= 0) {
-            ESP_LOGE(TAG, "httpd_req_recv failed: %d (got %d/%d)", ret, received, total_len);
             free(body_buf);
             const char *err = "{\"success\":false,\"error\":\"receive failed\"}";
             httpd_resp_set_type(req, "application/json");
@@ -492,11 +550,9 @@ static esp_err_t points_post_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "Received %d bytes JSON", received);
 
-    /* ---- 4. 解析 JSON ---- */
+    /* ---- 解析 JSON ---- */
     cJSON *root = cJSON_Parse(body_buf);
-    // body_buf 现在可以释放：我们只解析数字数组，cJSON 不保留原始字符串引用
     free(body_buf);
-    body_buf = NULL;
 
     if (!root) {
         const char *err = "{\"success\":false,\"error\":\"invalid JSON\"}";
@@ -505,33 +561,14 @@ static esp_err_t points_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    /* ---- 5. 提取 points 数组 ---- */
-    cJSON *points_arr = cJSON_GetObjectItem(root, "points");
-    if (!cJSON_IsArray(points_arr)) {
-        cJSON_Delete(root);
-        const char *err = "{\"success\":false,\"error\":\"missing 'points' array\"}";
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
-    }
-
-    int num = cJSON_GetArraySize(points_arr);
-    if (num < 2) {
-        cJSON_Delete(root);
-        const char *err = "{\"success\":false,\"error\":\"need at least 2 points\"}";
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
-    }
-
-    /* ---- 6. 提取参数 ---- */
-    float z_mm      = -200.0f;
-    uint32_t speed  = 800;
+    /* ---- 提取参数 ---- */
+    float z_mm      = DRAW_Z_DEFAULT;
+    uint32_t speed  = 50;
     uint8_t  accel  = 5;
-    uint32_t timeout = 5000;
+    uint32_t timeout = 3000;
 
-    cJSON *z_item = cJSON_GetObjectItem(root, "z");
-    if (cJSON_IsNumber(z_item)) z_mm = (float)z_item->valuedouble;
+    //cJSON *z_item = cJSON_GetObjectItem(root, "z");
+    //if (cJSON_IsNumber(z_item)) z_mm = (float)z_item->valuedouble;
 
     cJSON *sp_item = cJSON_GetObjectItem(root, "speed");
     if (cJSON_IsNumber(sp_item)) speed = (uint32_t)sp_item->valueint;
@@ -539,9 +576,9 @@ static esp_err_t points_post_handler(httpd_req_t *req)
     cJSON *ac_item = cJSON_GetObjectItem(root, "accel");
     if (cJSON_IsNumber(ac_item)) accel = (uint8_t)ac_item->valueint;
 
-    /* ---- 7. 提取点集 ---- */
-    pattern_point_t *pts = malloc(num * sizeof(pattern_point_t));
-    if (!pts) {
+    /* ---- 提取笔划数据 ---- */
+    pattern_point_t *all_pts = malloc(PATTERN_MAX_POINTS * sizeof(pattern_point_t));
+    if (!all_pts) {
         cJSON_Delete(root);
         const char *err = "{\"success\":false,\"error\":\"memory allocation failed\"}";
         httpd_resp_set_type(req, "application/json");
@@ -549,57 +586,107 @@ static esp_err_t points_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    uint16_t valid_count = 0;
-    for (int i = 0; i < num && valid_count < PATTERN_MAX_POINTS; i++) {
-        cJSON *pt = cJSON_GetArrayItem(points_arr, i);
-        if (cJSON_IsArray(pt) && cJSON_GetArraySize(pt) >= 2) {
-            cJSON *x = cJSON_GetArrayItem(pt, 0);
-            cJSON *y = cJSON_GetArrayItem(pt, 1);
-            if (cJSON_IsNumber(x) && cJSON_IsNumber(y)) {
-                pts[valid_count].x = (float)x->valuedouble;
-                pts[valid_count].y = (float)y->valuedouble;
-                valid_count++;
+    uint16_t total_valid = 0;
+
+    /* 尝试 strokes（二维数组） */
+    cJSON *strokes_arr = cJSON_GetObjectItem(root, "strokes");
+    if (cJSON_IsArray(strokes_arr)) {
+        int num_strokes = cJSON_GetArraySize(strokes_arr);
+        ESP_LOGI(TAG, "Received %d strokes", num_strokes);
+
+        for (int s = 0; s < num_strokes && total_valid < PATTERN_MAX_POINTS - 2; s++) {
+            cJSON *stroke = cJSON_GetArrayItem(strokes_arr, s);
+            if (!cJSON_IsArray(stroke)) continue;
+
+            int pt_count = cJSON_GetArraySize(stroke);
+            for (int i = 0; i < pt_count && total_valid < PATTERN_MAX_POINTS - 2; i++) {
+                cJSON *pt = cJSON_GetArrayItem(stroke, i);
+                if (cJSON_IsArray(pt) && cJSON_GetArraySize(pt) >= 2) {
+                    cJSON *x = cJSON_GetArrayItem(pt, 0);
+                    cJSON *y = cJSON_GetArrayItem(pt, 1);
+                    if (cJSON_IsNumber(x) && cJSON_IsNumber(y)) {
+                        all_pts[total_valid].x = (float)x->valuedouble;
+                        all_pts[total_valid].y = (float)y->valuedouble;
+                        total_valid++;
+                    }
+                }
+            }
+            /* ★ 笔划之间插入分隔标记（用 NaN 表示） */
+            if (s < num_strokes - 1 && total_valid < PATTERN_MAX_POINTS - 1) {
+                all_pts[total_valid].x = NAN;   /* 抬笔标记 */
+                all_pts[total_valid].y = NAN;
+                total_valid++;
+            }
+        }
+    }
+    /* 兼容旧格式：points（一维数组） */
+    else {
+        cJSON *points_arr = cJSON_GetObjectItem(root, "points");
+        if (cJSON_IsArray(points_arr)) {
+            int num = cJSON_GetArraySize(points_arr);
+            for (int i = 0; i < num && total_valid < PATTERN_MAX_POINTS; i++) {
+                cJSON *pt = cJSON_GetArrayItem(points_arr, i);
+                if (cJSON_IsArray(pt) && cJSON_GetArraySize(pt) >= 2) {
+                    cJSON *x = cJSON_GetArrayItem(pt, 0);
+                    cJSON *y = cJSON_GetArrayItem(pt, 1);
+                    if (cJSON_IsNumber(x) && cJSON_IsNumber(y)) {
+                        all_pts[total_valid].x = (float)x->valuedouble;
+                        all_pts[total_valid].y = (float)y->valuedouble;
+                        total_valid++;
+                    }
+                }
             }
         }
     }
 
     cJSON_Delete(root);
-   /* ---- 打印接收到的点集信息（调试用） ---- */
-    ESP_LOGI(TAG, "Pattern received: %u points, Z=%.1f, speed=%lu, accel=%u",
-             valid_count, z_mm, speed, accel);
-    for (uint16_t i = 0; i < valid_count && i < 5; i++) {
-        ESP_LOGI(TAG, "  pt[%u] = (%.1f, %.1f, %.1f)", i,
-                 (double)pts[i].x, (double)pts[i].y, (double)z_mm);
-    }
-    if (valid_count > 5) {
-        ESP_LOGI(TAG, "  ... and %u more points", valid_count - 5);
-    }
-    if (valid_count < 2) {
-        free(pts);
+
+    if (total_valid < 2) {
+        free(all_pts);
         const char *err = "{\"success\":false,\"error\":\"not enough valid points\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
-    /* ---- 8. 提交给图案播放器 ---- */
-    esp_err_t ret = pattern_player_load(pts, valid_count, z_mm, speed, accel, timeout);
-    free(pts);
+    /* ---- 打印接收到的点集 ---- */
+  // 统计笔划数（抬笔标记个数 + 1）
+  int stroke_count = 1;
+  for (uint16_t i = 0; i < total_valid; i++) {
+    if (isnan(all_pts[i].x)) stroke_count++;
+  }
+  // 避免连续 NaN 导致多计数，但传入数据由 HTTP 解析保证格式，直接使用即可
 
-    /* ---- 9. 响应 ---- */
+  ESP_LOGI(TAG, "Pattern received: %u points, %d strokes, Z=%.1f, speed=%lu, accel=%u",
+           total_valid, stroke_count, z_mm, speed, accel);
+
+  int current_stroke = 1;
+  for (uint16_t i = 0; i < total_valid; i++) {
+    if (isnan(all_pts[i].x)) {
+      //ESP_LOGI(TAG, "  --- lift pen (end of stroke %d) ---", current_stroke);
+      //current_stroke++;
+    } else {
+      // ESP_LOGI(TAG, "  [stroke %d] pt[%u] = (%.1f, %.1f, %.1f)",
+      //          current_stroke, i,
+      //          (double)all_pts[i].x, (double)all_pts[i].y, (double)z_mm);
+    }
+  }
+
+    /* ---- 提交给图案播放器 ---- */
+    esp_err_t ret = pattern_player_load(all_pts, total_valid, z_mm, speed, accel, timeout);
+    free(all_pts);
+
     char resp[256];
     if (ret == ESP_OK) {
         snprintf(resp, sizeof(resp),
-                 "{\"success\":true,\"point_count\":%u,\"z\":%.1f,\"speed\":%lu}",
-                 valid_count, z_mm, speed);
+                 "{\"success\":true,\"point_count\":%u,\"z\":%.1f}", total_valid, z_mm);
     } else {
         snprintf(resp, sizeof(resp),
-                 "{\"success\":false,\"error\":\"player busy, try again\"}");
+                 "{\"success\":false,\"error\":\"player busy\"}");
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
 
-    ESP_LOGI(TAG, "Pattern submitted: %u points", valid_count);
     return ESP_OK;
 }
 /* ================================================================

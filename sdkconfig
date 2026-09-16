@@ -746,6 +746,13 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# Delta 应用配置
+#
+CONFIG_DELTA_WIFI_SSID="nagatoYuki"
+CONFIG_DELTA_WIFI_PASSWORD="nagatoYuki"
+# end of Delta 应用配置
+
+#
 # Compiler options
 #
 # CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set

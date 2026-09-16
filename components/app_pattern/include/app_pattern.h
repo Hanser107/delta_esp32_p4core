@@ -5,6 +5,10 @@
 #include <stdbool.h>
 
 #define PATTERN_MAX_POINTS  600
+// ===== 绘图平面 Z 坐标（便于调试） =====
+#define DRAW_Z_DEFAULT  (-248.0f)   // 绘制时的 Z 坐标
+#define LIFT_Z_DEFAULT  (-200.0f)   // 抬笔时的 Z 坐标
+#define LIFT_SPEED_FACTOR  2.0f        // 抬笔速度为绘图速度的倍数
 
 typedef struct {
     float x;

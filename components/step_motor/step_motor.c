@@ -129,7 +129,7 @@ esp_err_t step_motor_set_enable(step_motor_handle_t handle,
     return ret;
 }
 
-esp_err_t step_motor_move_to(step_motor_handle_t handle,
+    esp_err_t step_motor_move_to(step_motor_handle_t handle,
                              uint8_t dir,
                              uint16_t speed,
                              uint8_t accel,
@@ -152,61 +152,46 @@ esp_err_t step_motor_move_to(step_motor_handle_t handle,
     // 运动中不允许新命令（除非处于同步等待且新命令也是同步等待）
     // 在 step_motor_move_to() 中替换原来 RUNNING 检查代码块
 
+    /*
+ * ★ 对于连续轨迹：允许新命令覆盖旧命令，不做任何延迟。
+ *
+ * 电机驱动器会在内部处理命令队列。
+ * 如果驱动器不支持覆盖，它会在当前命令完成后执行新命令，
+ * 这样至少不会丢命令。
+ */
     if (handle->state == STEP_MOTOR_RUNNING) {
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
         uint32_t running_duration = now - handle->running_since_ms;
 
-        if (running_duration > 5000) {
-            /* 情况 A：超过 5 秒，认定为卡死，强制恢复 */
-            ESP_LOGW(TAG, "Motor 0x%02X stuck %lums, force IDLE and accept new cmd",
+        if (running_duration > 10000) {
+            /* 超过 10 秒，可能通信断了，强制恢复 */
+            ESP_LOGW(TAG, "Motor 0x%02X stuck RUNNING %lums, force IDLE",
                      handle->addr, running_duration);
             handle->state = STEP_MOTOR_IDLE;
             handle->running_since_ms = 0;
-            // 放行：继续执行下面的命令发送逻辑
-
-        } else if (running_duration > 2000) {
-            /* 情况 B：运行 2~5 秒，可能是电机快到位了，短暂等待 */
-            ESP_LOGW(TAG, "Motor 0x%02X running %lums, waiting 150ms...",
-                     handle->addr, running_duration);
-            xSemaphoreGive(handle->mutex);
-            vTaskDelay(pdMS_TO_TICKS(150));   // 给电机 150ms 完成运动
-            xSemaphoreTake(handle->mutex, portMAX_DELAY);
-
-            if (handle->state == STEP_MOTOR_RUNNING) {
-                ESP_LOGW(TAG, "Motor 0x%02X still running after wait, force IDLE",
-                         handle->addr);
-                handle->state = STEP_MOTOR_IDLE;
-                handle->running_since_ms = 0;
-                // 放行
-            }
-            // 如果期间被位置轮询任务设为 IDLE 了，直接放行
-
-        } else {
-            /* 情况 C：运行不足 2 秒，正常拒绝 */
-            ESP_LOGW(TAG, "Motor 0x%02X already running (%lums), rejected",
-                     handle->addr, running_duration);
-            xSemaphoreGive(handle->mutex);
-            return ESP_ERR_INVALID_STATE;
         }
+        /* 否则直接放行，允许覆盖当前命令 */
     }
+
     if (handle->state == STEP_MOTOR_SYNC_WAITING) {
-        if (!sync) {
-            ESP_LOGW(TAG, "Motor 0x%02X waiting for sync, cannot accept immediate move",
-                     handle->addr);
-            xSemaphoreGive(handle->mutex);
-            return ESP_ERR_INVALID_STATE;
-        }
-        // sync=1 的新命令覆盖旧的 SYNC_WAITING：允许，电机驱动器会用新参数
-        // 但先检查是否卡在 SYNC_WAITING 太久
-        uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-        if (now - handle->running_since_ms > 10000) {
-            ESP_LOGW(TAG, "Motor 0x%02X stuck in SYNC_WAITING >10s, force IDLE",
-                     handle->addr);
-            handle->state = STEP_MOTOR_IDLE;
-            handle->running_since_ms = 0;
-        }
-        // 放行：覆盖旧的 sync 命令
+        /*
+         * SYNC_WAITING 不应该出现（因为我们不使用同步模式）。
+         * 如果出现了，说明之前的代码路径有问题，强制清除。
+         */
+        ESP_LOGW(TAG, "Motor 0x%02X unexpected SYNC_WAITING, force IDLE",
+                 handle->addr);
+        handle->state = STEP_MOTOR_IDLE;
+        handle->running_since_ms = 0;
+        /* 放行 */
     }
+
+    /* 设置新状态 */
+    if (sync) {
+        handle->state = STEP_MOTOR_SYNC_WAITING;
+    } else {
+        handle->state = STEP_MOTOR_RUNNING;
+    }
+    handle->running_since_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
     if (sync) {
         handle->state = STEP_MOTOR_SYNC_WAITING;
@@ -281,7 +266,7 @@ esp_err_t step_motor_update_position(step_motor_handle_t handle,
     // 在 step_motor_update_position 的状态判断区域增加：
     if (handle->state == STEP_MOTOR_SYNC_WAITING) {
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-        if (now - handle->running_since_ms > 3000) {
+        if (now - handle->running_since_ms > 2000) {
             ESP_LOGW(TAG, "Motor 0x%02X stuck in SYNC_WAITING, force IDLE",
                      handle->addr);
             handle->state = STEP_MOTOR_IDLE;

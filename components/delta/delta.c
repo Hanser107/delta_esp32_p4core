@@ -37,7 +37,7 @@ static const char *TAG = "delta";
 /* ---------------- 安全间距（单位 mm） ---------------- */
 #define WORKSPACE_SAFETY_MARGIN_Z      3.0f   // Z 轴上下内缩量（防止碰撞上下平台）
 #define WORKSPACE_SAFETY_MARGIN_R_MAX  38.0f   // 最大半径方向内缩量（远离外边界，防止关节拉到极限）
-#define WORKSPACE_SAFETY_MARGIN_R_MIN  3.0f   // 最小半径方向外扩量（远离中心空洞，防止连杆干涉）
+#define WORKSPACE_SAFETY_MARGIN_R_MIN  0.3f   // 最小半径方向外扩量（远离中心空洞，防止连杆干涉）
 
 /* 球形工作空间参数 */
 // 每层最大半径 (mm)
@@ -79,7 +79,7 @@ static const float workspace_R_min[WORKSPACE_N_BINS] = {
  *   - WORKSPACE_SAFETY_MARGIN_R_MIN：从中心空洞边界向外扩，避免连杆干涉
  *   - 两者独立调节，互不干扰
  */
-static void clamp_to_workspace(float *x, float *y, float *z)
+void clamp_to_workspace(float *x, float *y, float *z)
 {
     float x_orig = *x, y_orig = *y, z_orig = *z;
 
@@ -439,23 +439,40 @@ esp_err_t delta_go_to_async(float x, float y, float z,
         return ESP_ERR_INVALID_ARG;
     }
 
-    move_cmd_t cmd = {
-        .theta1 = clamp_angle(result.theta1),
-        .theta2 = clamp_angle(result.theta2),
-        .theta3 = clamp_angle(result.theta3),
-        .speed = speed,
-        .accel = accel,
-        .timeout_ms = timeout_ms,
-    };
-
-    // 非阻塞投递，若队列满则等待最多 100ms（避免丢失点但又不卡死 UI）
-    if (xQueueSend(g_move_queue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGE(TAG, "Move queue full, dropping point (%.1f, %.1f, %.1f)", x, y, z);
-        return ESP_ERR_INVALID_STATE;
+    // 直接发送，不经过队列，不等待
+    esp_err_t ret = move_abs_fire(result.theta1, result.theta2, result.theta3,
+                                  speed, accel, timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "move_abs_fire fail: %x", ret);
+        return ret;
     }
 
-    // 更新 UI 可能依赖的坐标记录（如果主界面需要显示）
-    // 注意：此时运动可能还未执行，显示的坐标是“目标坐标”
+    delta_coord.x_coord = x;
+    delta_coord.y_coord = y;
+    delta_coord.z_coord = z;
+    return ESP_OK;
+}
+
+esp_err_t delta_go_to_queue(float x, float y, float z,
+                            uint32_t speed, uint8_t accel,
+                            uint32_t timeout_ms)
+{
+    delta_ik_result_t result = {0};
+    clamp_to_workspace(&x, &y, &z);
+
+    if (!Delta_CalculateIK(x, y, z, &result)) {
+        ESP_LOGE(TAG, "IK fail for async: (%.1f, %.1f, %.1f)", x, y, z);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 直接发送，不经过队列，不等待
+    esp_err_t ret = move_abs_async(result.theta1, result.theta2, result.theta3,
+                                  speed, accel, timeout_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "move_abs_fire fail: %x", ret);
+        return ret;
+    }
+
     delta_coord.x_coord = x;
     delta_coord.y_coord = y;
     delta_coord.z_coord = z;
@@ -510,5 +527,41 @@ esp_err_t move_set_zero_position_async(uint8_t motor_id, uint32_t timeout_ms) {
         ESP_LOGW(TAG, "Move queue full, dropping command");
         return ESP_ERR_INVALID_STATE;
     }
+    return ESP_OK;
+}
+
+esp_err_t delta_claw_eoa(Servo *servo, uint32_t timeout_ms) {
+    static uint8_t flag = 0;
+    if (!flag) {
+        servo->set_angle(servo, 95.0f);
+        flag = 1;
+    }
+    else {
+        servo->set_angle(servo, 0.0f);
+        flag = 0;
+    }
+    ESP_LOGI(TAG, "delta_eoa(servo, 45.0f)");
+    return ESP_OK;
+}
+
+esp_err_t delta_pump_eoa(Servo *p_servo, Servo *v_servo, uint32_t timeout_ms) {
+    static uint8_t flag = 0;
+    if (!flag) {
+        v_servo->set_angle(v_servo, 0.0f);
+        p_servo->set_angle(p_servo, 180.0f);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        p_servo->set_angle(p_servo, 0.0f);
+        flag = 1;
+        ESP_LOGI(TAG, "Absorb items");
+    }
+    else {
+        p_servo->set_angle(p_servo, 0.0f);
+        v_servo->set_angle(v_servo, 180.0f);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        v_servo->set_angle(v_servo, 0.0f);
+        flag = 0;
+        ESP_LOGI(TAG, "Put down the item");
+    }
+
     return ESP_OK;
 }

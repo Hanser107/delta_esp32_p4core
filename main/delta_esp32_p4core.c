@@ -26,11 +26,11 @@ void app_main(void)
     /* WIFI 初始化 */
     WIFI_Init();
     ESP_LOGI(TAG, "WIFI_INIT completed");
-    // esp_err_t err = mic_test_start();
-    // if (err != ESP_OK) {
-    //     ESP_LOGE(TAG, "Mic test failed to start");
-    // }
-    //ESP_LOGI(TAG, "Mic test completed");
+     // esp_err_t err = inmp441_mic_start();
+     // if (err != ESP_OK) {
+     //     ESP_LOGE(TAG, "Mic test failed to start");
+     // }
+    ESP_LOGI(TAG, "Mic test completed");
     move_init();
     delta_init();
     ESP_LOGI(TAG, "wait motor homing...");

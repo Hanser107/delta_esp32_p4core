@@ -188,11 +188,8 @@ static esp_err_t motor_abs_to_move(int32_t target_pulses[3],
                                    uint16_t speed, uint8_t accel,
                                    uint32_t timeout_ms)
 {
-    int32_t pulses[3] = {0};
-    uint8_t dir = 0;
     step_motor_handle_t motors[3] = {motor1, motor2, motor3};
 
-    /* ---- 0. 使能检查 ---- */
     for (int i = 0; i < 3; i++) {
         if (!step_motor_is_enabled(motors[i])) {
             ESP_LOGE(TAG, "Motor %d not enabled", i+1);
@@ -200,57 +197,15 @@ static esp_err_t motor_abs_to_move(int32_t target_pulses[3],
         }
     }
 
-    /* ---- 等待所有电机退出 RUNNING ---- */
-    for (int attempt = 0; attempt < 15; attempt++) {
-        bool all_ready = true;
-        for (int i = 0; i < 3; i++) {
-            step_motor_state_t st = step_motor_get_state(motors[i]);
-            if (st == STEP_MOTOR_RUNNING) {
-                all_ready = false;
-                break;
-            }
-        }
-        if (all_ready) break;
-
-        // 位置轮询任务可能在此时把电机拉回 IDLE
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-
-    /* ---- 最终确认（超过 300ms 仍未就绪则放弃，不污染任何电机）---- */
     for (int i = 0; i < 3; i++) {
-        step_motor_state_t st = step_motor_get_state(motors[i]);
-        if (st == STEP_MOTOR_RUNNING) {
-            ESP_LOGE(TAG, "Motor %d still RUNNING, abort ALL to avoid pollution", i + 1);
-            return ESP_ERR_INVALID_STATE;   //此时没有任何电机被修改
-        }
-    }
+        uint8_t dir = (target_pulses[i] < 0) ? 1 : 0;
+        int32_t abs_pulses = (target_pulses[i] < 0) ? -target_pulses[i] : target_pulses[i];
 
-    /* ---- 原子发送（此时所有电机已确认就绪）---- */
-    for (int i = 0; i < 3; i++) {
-        dir = target_pulses[i] < 0 ? 1 : 0;
-        pulses[i] = abs(target_pulses[i]);
-
-        esp_err_t ret = step_motor_move_to(motors[i],
-                                           dir, speed, accel,
-                                           pulses[i],
-                                           1,            // 绝对运动
-                                           1,            // 同步等待
-                                           timeout_ms);
-        ESP_LOGI(TAG, "Motor %d CMD MOVE: dir=%d, pulses=%ld", i + 1, dir, pulses[i]);
+        esp_err_t ret = step_motor_move_to(motors[i], dir, speed, accel,
+                                           abs_pulses, 1, 0, timeout_ms);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Motor %d cmd failed: 0x%x", i + 1, ret);
-            // 理论上不应该走到这里（已预检），但仍做防护
+            ESP_LOGW(TAG, "Motor %d cmd fail: %x", i+1, ret);
             return ret;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(50));
-    step_motor_global_sync_trigger(fb, timeout_ms);
-    for (int i = 0; i < 3; i++) {
-        esp_err_t ret = step_motor_notify_sync_started(motors[i]);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Motor %d sync start notify failed", i + 1);
         }
     }
     return ESP_OK;
@@ -336,6 +291,61 @@ esp_err_t move_abs_async(float a1, float a2, float a3,
         return ESP_ERR_INVALID_STATE;
     }
     return ESP_OK;
+}
+/**
+ * @brief 立即发送三轴绝对运动命令，不做任何状态检查与等待
+ *        用于连续轨迹，由上层控制投递节奏。
+ */
+static esp_err_t motor_abs_fire(float a1, float a2, float a3,
+                                uint16_t speed, uint8_t accel,
+                                uint32_t timeout_ms)
+{
+    int32_t pulses[3];
+    pulses[0] = angle_to_pulses(a1);
+    pulses[1] = angle_to_pulses(a2);
+    pulses[2] = angle_to_pulses(a3);
+
+    step_motor_handle_t motors[3] = {motor1, motor2, motor3};
+
+    /* 直接发送，不检查使能（上层已保证），不等待 RUNNING */
+    for (int i = 0; i < 3; i++) {
+        uint8_t dir = (pulses[i] < 0) ? 1 : 0;
+        int32_t abs_pulses = (pulses[i] < 0) ? -pulses[i] : pulses[i];
+
+        /* sync = false, motion_type = 1 (绝对) */
+        esp_err_t ret = step_motor_move_to(motors[i],
+                                           dir, speed, accel,
+                                           abs_pulses,
+                                           1,          // absolute
+                                           0,          // no sync
+                                           timeout_ms);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Motor %d fire cmd fail: %x", i+1, ret);
+            // 不中断，继续投递其余电机
+        }
+    }
+    return ESP_OK;
+}
+
+/**
+ * @brief 公开的“发射”接口，供 pattern_player 直接调用
+ */
+esp_err_t move_abs_fire(float a1, float a2, float a3,
+                        uint16_t speed, uint8_t accel, uint32_t timeout_ms)
+{
+    a1 = clamp_angle(a1);
+    a2 = clamp_angle(a2);
+    a3 = clamp_angle(a3);
+
+    ESP_LOGI(TAG, "FIRE: (%.2f, %.2f, %.2f)", a1, a2, a3);
+
+    esp_err_t ret = motor_abs_fire(a1, a2, a3, speed, accel, timeout_ms);
+    if (ret == ESP_OK) {
+        last_target_angle[0] = a1;
+        last_target_angle[1] = a2;
+        last_target_angle[2] = a3;
+    }
+    return ret;
 }
 
 /**

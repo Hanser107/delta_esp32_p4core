@@ -34,7 +34,7 @@ esp_err_t app_rtos_init(void)
     }
 
     /* ---- 创建运动命令队列（容量 32）---- */
-    g_move_queue = xQueueCreate(32, sizeof(move_cmd_t));
+    g_move_queue = xQueueCreate(256, sizeof(move_cmd_t));
     if (!g_move_queue) {
         ESP_LOGE(TAG, "Failed to create move command queue");
         vEventGroupDelete(g_motor_done_events);
@@ -220,8 +220,8 @@ void motion_executor_task(void *pvParameters)
         );
 
         if ((bits & ALL_MOTORS_DONE) == ALL_MOTORS_DONE) {
-            ESP_LOGI(TAG, "Motion complete: θ=(%.1f, %.1f, %.1f)°",
-                     cmd.theta1, cmd.theta2, cmd.theta3);
+            // ESP_LOGI(TAG, "Motion complete: θ=(%.1f, %.1f, %.1f)°",
+            //          cmd.theta1, cmd.theta2, cmd.theta3);
         } else {
             /* ---- 超时：兜底处理 ---- */
             ESP_LOGW(TAG, "Motion timeout (%lums), force recovery...",

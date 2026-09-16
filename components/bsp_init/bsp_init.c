@@ -9,6 +9,7 @@ step_motor_handle_t motor1;
 step_motor_handle_t motor2;
 step_motor_handle_t motor3;
 motor_feedback_handle_t fb;
+Servo claw_servo, pump_servo, valve_servo;
 
 typedef struct {
     step_motor_handle_t motor1;
@@ -39,7 +40,7 @@ static void on_motor_notification(const motor_response_t *resp, void *ctx)
             step_motor_force_idle(target);
             ESP_LOGI(TAG, "Motor 0x%02X 9F → IDLE", resp->addr);
 
-            // ✅ 新增：设置 EventGroup 位
+            //设置 EventGroup 位
             if (g_motor_done_events && bit) {
                 xEventGroupSetBits(g_motor_done_events, bit);
             }
@@ -65,7 +66,7 @@ void bsp_init(void)
     g_motor_ctx.motor2 = NULL;
     g_motor_ctx.motor3 = NULL;
 
-    // ✅ 注册增强回调
+    // 注册增强回调
     ESP_ERROR_CHECK(motor_feedback_register_callback(
         fb, on_motor_notification, &g_motor_ctx));
 
@@ -78,4 +79,15 @@ void bsp_init(void)
     g_motor_ctx.motor3 = motor3;
 
     ESP_LOGI(TAG, "STEP_MOTOR_INIT SUCCESS");
+
+    servo_init(&claw_servo, GPIO_NUM_6,
+               LEDC_CHANNEL_0, LEDC_TIMER_0,
+               0, 0, 20.0f);
+    servo_init(&pump_servo, GPIO_NUM_36,
+               LEDC_CHANNEL_3, LEDC_TIMER_0,
+               0, 0, 0.0f);
+    servo_init(&valve_servo, GPIO_NUM_33,
+                 LEDC_CHANNEL_2, LEDC_TIMER_0,
+            0,0, 0.0f);
+    ESP_LOGI(TAG, "SERVO_INIT SUCCESS");
 }

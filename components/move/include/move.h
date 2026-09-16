@@ -61,7 +61,8 @@ esp_err_t move_wait_all_reached_evt(uint32_t timeout_ms);
 
 esp_err_t move_abs_async(float a1, float a2, float a3,
                      uint16_t speed, uint8_t accel, uint32_t timeout_ms);
-
+    esp_err_t move_abs_fire(float a1, float a2, float a3,
+                            uint16_t speed, uint8_t accel, uint32_t timeout_ms);
 
 void move_fb_test(void);
 void move_global_sync(void);
