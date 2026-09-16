@@ -1,93 +1,53 @@
-#include "bsp_init.h"
-#include "esp_log.h"
-
-#define TAG "bsp_init"
-
-gpio_led_t led1;
-uart_comm_handle_t uart;
-step_motor_handle_t motor1;
-step_motor_handle_t motor2;
-step_motor_handle_t motor3;
-motor_feedback_handle_t fb;
-Servo claw_servo, pump_servo, valve_servo;
-
-typedef struct {
-    step_motor_handle_t motor1;
-    step_motor_handle_t motor2;
-    step_motor_handle_t motor3;
-} motor_callback_ctx_t;
-
-static motor_callback_ctx_t g_motor_ctx;
-
 /**
- * @brief 到位 / 回零完成回调（增强版）
- *        1. 调用 step_motor_force_idle 恢复状态
- *        2. 设置 EventGroup 位，唤醒等待者
+ * @file bsp_init.c
+ * @brief 板级初始化的实现。
+ * @details 依次初始化 UART 总线、步进协议、三个轴与工具头。
  */
-static void on_motor_notification(const motor_response_t *resp, void *ctx)
+
+#include "bsp_init.h"
+#include "uart_comm.h"
+#include "end_effector.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "esp_check.h"
+
+static const char *TAG = "bsp_init";
+
+/* ------------------------------------------------------- 步进电机总线 */
+#define MOTOR_UART       UART_NUM_1
+#define MOTOR_UART_RX    GPIO_NUM_5
+#define MOTOR_UART_TX    GPIO_NUM_4
+
+/* RS485 总线上的电机地址。 */
+static const uint8_t s_motor_addr[3] = { 0x01, 0x02, 0x03 };
+
+motor_feedback_handle_t g_motor_fb;
+step_motor_handle_t     g_motors[3];
+
+static uart_comm_handle_t s_motor_uart;
+
+esp_err_t bsp_init(void)
 {
-    motor_callback_ctx_t *mctx = (motor_callback_ctx_t *)ctx;
-
-    if (resp->status == MOTOR_STATUS_REACHED) {   // 0x9F
-        step_motor_handle_t target = NULL;
-        EventBits_t bit = 0;
-
-        if (resp->addr == 0x01)      { target = mctx->motor1; bit = MOTOR1_DONE_BIT; }
-        else if (resp->addr == 0x02) { target = mctx->motor2; bit = MOTOR2_DONE_BIT; }
-        else if (resp->addr == 0x03) { target = mctx->motor3; bit = MOTOR3_DONE_BIT; }
-
-        if (target) {
-            step_motor_force_idle(target);
-            ESP_LOGI(TAG, "Motor 0x%02X 9F → IDLE", resp->addr);
-
-            //设置 EventGroup 位
-            if (g_motor_done_events && bit) {
-                xEventGroupSetBits(g_motor_done_events, bit);
-            }
-        }
-    }
-}
-
-void bsp_init(void)
-{
+    /* ---- 1. 电机总线 ---------------------------------------------------- */
     uart_comm_config_t uart_cfg = UART_COMM_CONFIG_DEFAULT(
-        UART_NUM_1,
-        GPIO_NUM_5,     // RX
-        GPIO_NUM_4      // TX
-    );
-    ESP_ERROR_CHECK(uart_comm_init(&uart_cfg, &uart));
-    ESP_LOGI(TAG, "UART_INIT SUCCESS");
+        MOTOR_UART, MOTOR_UART_RX, MOTOR_UART_TX);
+    ESP_RETURN_ON_ERROR(uart_comm_init(&uart_cfg, &s_motor_uart), TAG,
+                        "UART init failed");
 
     motor_feedback_config_t fb_cfg = MOTOR_FEEDBACK_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(motor_feedback_init(uart, &fb_cfg, &fb));
-    ESP_LOGI(TAG, "MOTOR_FB_INIT SUCCESS");
+    ESP_RETURN_ON_ERROR(motor_feedback_init(s_motor_uart, &fb_cfg, &g_motor_fb),
+                        TAG, "motor protocol init failed");
 
-    g_motor_ctx.motor1 = NULL;
-    g_motor_ctx.motor2 = NULL;
-    g_motor_ctx.motor3 = NULL;
+    /* ---- 2. 轴 --------------------------------------------------------- */
+    for (int i = 0; i < 3; i++) {
+        ESP_RETURN_ON_ERROR(
+            step_motor_init(g_motor_fb, s_motor_addr[i], &g_motors[i]),
+            TAG, "axis %d init failed", i + 1);
+    }
 
-    // 注册增强回调
-    ESP_ERROR_CHECK(motor_feedback_register_callback(
-        fb, on_motor_notification, &g_motor_ctx));
+    /* ---- 3. 工具头 ---------------------------------------------------- */
+    ESP_RETURN_ON_ERROR(end_effector_init(), TAG, "end effector init failed");
 
-    ESP_ERROR_CHECK(step_motor_init(fb, 0x01, &motor1));
-    ESP_ERROR_CHECK(step_motor_init(fb, 0x02, &motor2));
-    ESP_ERROR_CHECK(step_motor_init(fb, 0x03, &motor3));
-
-    g_motor_ctx.motor1 = motor1;
-    g_motor_ctx.motor2 = motor2;
-    g_motor_ctx.motor3 = motor3;
-
-    ESP_LOGI(TAG, "STEP_MOTOR_INIT SUCCESS");
-
-    servo_init(&claw_servo, GPIO_NUM_6,
-               LEDC_CHANNEL_0, LEDC_TIMER_0,
-               0, 0, 20.0f);
-    servo_init(&pump_servo, GPIO_NUM_36,
-               LEDC_CHANNEL_3, LEDC_TIMER_0,
-               0, 0, 0.0f);
-    servo_init(&valve_servo, GPIO_NUM_33,
-                 LEDC_CHANNEL_2, LEDC_TIMER_0,
-            0,0, 0.0f);
-    ESP_LOGI(TAG, "SERVO_INIT SUCCESS");
+    ESP_LOGI(TAG, "Board ready (UART%d, %d axes)", MOTOR_UART, 3);
+    return ESP_OK;
 }

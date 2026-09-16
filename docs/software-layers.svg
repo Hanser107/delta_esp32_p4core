@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="760" viewBox="0 0 1060 760"
+     font-family="Noto Sans CJK SC, Source Han Sans SC, Microsoft YaHei, DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="a5" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .lyr { fill:#f1f5f9; stroke:#94a3b8; stroke-width:1.4; rx:10; }
+      .lbl { font-size:15px; fill:#0f172a; font-weight:bold; }
+      .cmp { fill:#ffffff; stroke:#334155; stroke-width:1.6; rx:8; }
+      .cmt { font-size:14px; fill:#0f172a; }
+      .sub { font-size:11.5px; fill:#64748b; }
+    </style>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="530" y="36" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">图 5  软件分层与组件依赖</text>
+
+  <!-- 依赖方向箭头 -->
+  <line x1="18" y1="70" x2="18" y2="690" stroke="#64748b" stroke-width="2" marker-end="url(#a5)"/>
+  <text x="10" y="380" font-size="13" fill="#64748b" transform="rotate(-90 10 380)" text-anchor="middle">依赖方向：上层依赖下层（无环）</text>
+
+  <!-- 入口层 -->
+  <rect class="lyr" x="40" y="66" width="990" height="60"/>
+  <text class="lbl" x="58" y="102">入口</text>
+  <rect class="cmp" x="220" y="74" width="420" height="44"/>
+  <text class="cmt" x="238" y="94">main</text>
+  <text class="sub" x="238" y="110">按固定顺序初始化各子系统，唯一入口 app_main()</text>
+
+  <!-- 界面层 -->
+  <rect class="lyr" x="40" y="146" width="990" height="60"/>
+  <text class="lbl" x="58" y="182">界面层 L6</text>
+  <rect class="cmp" x="220" y="154" width="170" height="44"/>
+  <text class="cmt" x="238" y="182">screen（LVGL 显示启动）</text>
+  <rect class="cmp" x="410" y="154" width="330" height="44"/>
+  <text class="cmt" x="428" y="182">delta_ui（界面行为层 + GUI Guider 资源）</text>
+
+  <!-- 应用层 -->
+  <rect class="lyr" x="40" y="226" width="990" height="60"/>
+  <text class="lbl" x="58" y="262">应用层 L5</text>
+  <rect class="cmp" x="220" y="234" width="150" height="44"/>
+  <text class="cmt" x="234" y="262">app_task</text>
+  <rect class="cmp" x="386" y="234" width="170" height="44"/>
+  <text class="cmt" x="400" y="262">app_pattern</text>
+  <rect class="cmp" x="572" y="234" width="150" height="44"/>
+  <text class="cmt" x="586" y="262">app_http</text>
+  <rect class="cmp" x="738" y="234" width="150" height="44"/>
+  <text class="cmt" x="752" y="262">app_wifi</text>
+
+  <!-- 语义层 -->
+  <rect class="lyr" x="40" y="306" width="990" height="60"/>
+  <text class="lbl" x="58" y="342">语义层 L4</text>
+  <rect class="cmp" x="220" y="314" width="150" height="44"/>
+  <text class="cmt" x="234" y="342">delta</text>
+  <rect class="cmp" x="386" y="314" width="190" height="44"/>
+  <text class="cmt" x="400" y="342">end_effector</text>
+  <rect class="cmp" x="592" y="314" width="150" height="44"/>
+  <text class="cmt" x="606" y="342">bsp_init</text>
+
+  <!-- 运动层 -->
+  <rect class="lyr" x="40" y="386" width="990" height="60"/>
+  <text class="lbl" x="58" y="422">运动层 L3</text>
+  <rect class="cmp" x="220" y="394" width="420" height="44"/>
+  <text class="cmt" x="238" y="422">move（命令队列、完成票据、三轴协调、关节限幅）</text>
+
+  <!-- 设备层 -->
+  <rect class="lyr" x="40" y="466" width="990" height="60"/>
+  <text class="lbl" x="58" y="502">设备层 L2</text>
+  <rect class="cmp" x="220" y="474" width="180" height="44"/>
+  <text class="cmt" x="234" y="502">step_motor（单轴状态机）</text>
+  <rect class="cmp" x="416" y="474" width="150" height="44"/>
+  <text class="cmt" x="430" y="502">servo（LEDC）</text>
+
+  <!-- 协议层 -->
+  <rect class="lyr" x="40" y="546" width="990" height="60"/>
+  <text class="lbl" x="58" y="582">协议/传输层 L1</text>
+  <rect class="cmp" x="220" y="554" width="260" height="44"/>
+  <text class="cmt" x="234" y="582">motor_feedback（ZDT_X42S 帧协议）</text>
+  <rect class="cmp" x="496" y="554" width="200" height="44"/>
+  <text class="cmt" x="510" y="582">uart_comm（串口收发）</text>
+
+  <!-- 硬件 -->
+  <rect class="lyr" x="40" y="626" width="990" height="60"/>
+  <text class="lbl" x="58" y="662">硬件</text>
+  <rect class="cmp" x="220" y="634" width="200" height="44"/>
+  <text class="cmt" x="234" y="662">ZDT_X42S 闭环步进 ×3</text>
+  <rect class="cmp" x="436" y="634" width="160" height="44"/>
+  <text class="cmt" x="450" y="662">夹爪 / 泵 / 阀舵机</text>
+  <rect class="cmp" x="612" y="634" width="180" height="44"/>
+  <text class="cmt" x="626" y="662">MIPI-DSI 屏 + 触摸</text>
+</svg>

@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1420" height="700" viewBox="0 0 1420 700"
+     font-family="Noto Sans CJK SC, Source Han Sans SC, Microsoft YaHei, DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="f6" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <marker id="f6d" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/>
+    </marker>
+    <style>
+      .bx  { fill:#ffffff; stroke:#334155; stroke-width:1.7; rx:9; }
+      .hbx { fill:#eff6ff; stroke:#1d4ed8; stroke-width:1.8; rx:9; }
+      .fbx { fill:#fffbeb; stroke:#b45309; stroke-width:1.7; rx:9; }
+      .t   { font-size:14px; fill:#0f172a; }
+      .t2  { font-size:11.5px; fill:#475569; }
+      .ttl { font-size:23px; font-weight:bold; fill:#1f2937; }
+    </style>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text class="ttl" x="710" y="36" text-anchor="middle">图 6  运动指令流、两条执行通路与完成同步</text>
+
+  <!-- 图例 -->
+  <line x1="1020" y1="24" x2="1060" y2="24" stroke="#334155" stroke-width="2.4" marker-end="url(#f6)"/>
+  <text x="1068" y="29" font-size="13" fill="#334155">指令流</text>
+  <line x1="1160" y1="24" x2="1200" y2="24" stroke="#b45309" stroke-width="2.2" stroke-dasharray="6 4" marker-end="url(#f6d)"/>
+  <text x="1208" y="29" font-size="13" fill="#b45309">状态 / 反馈</text>
+
+  <!-- 指令来源 -->
+  <rect class="bx" x="30" y="100" width="190" height="52"/>
+  <text class="t" x="46" y="122">LVGL 触摸界面</text>
+  <text class="t2" x="46" y="140">坐标滑块 / 方向键 / 回零</text>
+
+  <rect class="bx" x="30" y="168" width="190" height="52"/>
+  <text class="t" x="46" y="190">Web 绘图页</text>
+  <text class="t2" x="46" y="208">POST /api/points</text>
+
+  <rect class="bx" x="30" y="236" width="190" height="52"/>
+  <text class="t" x="46" y="258">轨迹播放器</text>
+  <text class="t2" x="46" y="276">app_pattern</text>
+
+  <!-- delta -->
+  <rect class="hbx" x="280" y="168" width="210" height="52"/>
+  <text class="t" x="296" y="190">delta：逆运动学</text>
+  <text class="t2" x="296" y="208">+ 工作空间钳位</text>
+
+  <!-- 两条通路 -->
+  <rect class="bx" x="550" y="100" width="270" height="52"/>
+  <text class="t" x="566" y="122">排队通路：move_abs_async</text>
+  <text class="t2" x="566" y="140">→ g_move_queue（FIFO，有序列）</text>
+
+  <rect class="bx" x="550" y="236" width="270" height="52"/>
+  <text class="t" x="566" y="258">直发通路：move_abs_fire</text>
+  <text class="t2" x="566" y="276">覆盖式下发，用于连续插补</text>
+
+  <!-- 执行 -->
+  <rect class="bx" x="880" y="100" width="220" height="52"/>
+  <text class="t" x="896" y="122">motion_exec 任务</text>
+  <text class="t2" x="896" y="140">move_execute() 串行执行</text>
+
+  <!-- 轴与驱动器 -->
+  <rect class="bx" x="1160" y="168" width="220" height="52"/>
+  <text class="t" x="1176" y="190">step_motor 三轴</text>
+  <text class="t2" x="1176" y="208">使能 / 运动 / 到位 / 回零</text>
+
+  <rect class="bx" x="1160" y="286" width="220" height="52"/>
+  <text class="t" x="1176" y="308">ZDT_X42S 驱动器 ×3</text>
+  <text class="t2" x="1176" y="326">RS485 闭环步进</text>
+
+  <!-- 指令流箭头 -->
+  <path d="M220,126 L250,126 L250,190 L280,190" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+  <path d="M220,194 L280,194" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+  <path d="M220,262 L250,262 L250,200 L280,200" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+
+  <path d="M490,186 L520,186 L520,126 L550,126" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+  <text x="496" y="112" font-size="12" fill="#475569">排队 API</text>
+  <path d="M490,202 L520,202 L520,262 L550,262" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+  <text x="496" y="292" font-size="12" fill="#475569">直发 API</text>
+
+  <path d="M820,126 L880,126" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+  <path d="M1100,126 L1130,126 L1130,190 L1160,190" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+  <path d="M820,262 L1000,262 L1000,210 L1160,210" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+  <path d="M1270,220 L1270,286" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+
+  <!-- 反馈：驱动器 -> 协议层 -->
+  <path d="M1160,330 L1140,330 L1140,404 L1040,404" fill="none" stroke="#b45309" stroke-width="2.2" stroke-dasharray="6 4" marker-end="url(#f6d)"/>
+  <text x="1130" y="376" font-size="12" fill="#b45309" text-anchor="end">0x9F 上报 / 0x36 位置 / 0x3A 状态</text>
+
+  <rect class="fbx" x="740" y="378" width="300" height="52"/>
+  <text class="t" x="756" y="400">motor_feedback：解析 0x9F</text>
+  <text class="t2" x="756" y="418">帧校验 + 主动上报回调</text>
+
+  <path d="M1040,404 L1080,404" fill="none" stroke="#b45309" stroke-width="2.2" stroke-dasharray="6 4" marker-end="url(#f6d)"/>
+
+  <rect class="fbx" x="1080" y="378" width="300" height="52"/>
+  <text class="t" x="1096" y="400">move 回调 → 该轴置 IDLE</text>
+  <text class="t2" x="1096" y="418">到达判定的最快通路</text>
+
+  <!-- pos_poll -->
+  <rect class="fbx" x="400" y="378" width="300" height="52"/>
+  <text class="t" x="416" y="400">pos_poll 任务</text>
+  <text class="t2" x="416" y="418">每 50 ms 刷新位置，回收卡死轴</text>
+  <path d="M1160,312 L1120,312 L1120,356 L560,356 L560,378" fill="none" stroke="#b45309" stroke-width="2.0" stroke-dasharray="6 4" marker-end="url(#f6d)"/>
+
+  <!-- 完成同步 -->
+  <rect class="fbx" x="400" y="500" width="300" height="52"/>
+  <text class="t" x="416" y="522">move_wait_all_idle()</text>
+  <text class="t2" x="416" y="540">轮询三轴状态直到全部 IDLE</text>
+  <path d="M1270,338 L1270,470 L560,470 L560,500" fill="none" stroke="#b45309" stroke-width="2.0" stroke-dasharray="6 4" marker-end="url(#f6d)"/>
+
+  <rect class="fbx" x="740" y="500" width="300" height="52"/>
+  <text class="t" x="756" y="522">move_wait_ticket(ticket)</text>
+  <text class="t2" x="756" y="540">等待指定命令被真正执行完</text>
+  <path d="M990,140 L1000,140 L1000,480 L1000,500" fill="none" stroke="#b45309" stroke-width="2.0" stroke-dasharray="6 4" marker-end="url(#f6d)"/>
+  <text x="1008" y="446" font-size="12" fill="#b45309">完成票据</text>
+
+  <rect class="bx" x="1080" y="500" width="300" height="52"/>
+  <text class="t" x="1096" y="522">delta_go_to() 返回</text>
+  <text class="t2" x="1096" y="540">轨迹进入下一步 / 界面解锁</text>
+  <path d="M700,520 L1080,516" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+  <path d="M1040,538 L1080,532" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#f6)"/>
+
+  <!-- 安全约束说明 -->
+  <rect x="30" y="606" width="1350" height="64" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="48" y="632" font-size="14" fill="#0f172a">安全约束：所有笛卡尔目标先经工作空间钳位（Z 上下内缩、外径内缩、中心空洞外扩），再解算为关节角；</text>
+  <text x="48" y="656" font-size="14" fill="#0f172a">关节角统一限幅到 [−15°, 80°] 后才下发；无论走哪条通路，驱动器都不会收到超限指令。</text>
+</svg>

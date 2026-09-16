@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="640" viewBox="0 0 860 640"
+     font-family="Noto Sans CJK SC, Source Han Sans SC, Microsoft YaHei, DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="arrow2" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="430" y="40" text-anchor="middle" font-size="23" font-weight="bold" fill="#1f2937">图 2  基座坐标系与三条支链的 120° 布置（俯视图）</text>
+
+  <!-- 坐标轴 -->
+  <line x1="430" y1="320" x2="800" y2="320" stroke="#374151" stroke-width="1.8" marker-end="url(#arrow2)"/>
+  <line x1="430" y1="320" x2="430" y2="80" stroke="#374151" stroke-width="1.8" marker-end="url(#arrow2)"/>
+  <text x="806" y="326" font-size="16" fill="#374151">X</text>
+  <text x="420" y="76" font-size="16" fill="#374151">Y</text>
+  <text x="376" y="352" font-size="15" fill="#6b7280" text-anchor="end">O（固定平台中心）</text>
+  <line x1="382" y1="347" x2="424" y2="325" stroke="#6b7280" stroke-width="1"/>
+
+  <!-- 固定平台半径圆 Ru -->
+  <circle cx="430" cy="320" r="160" fill="none" stroke="#1e40af" stroke-width="2.2" stroke-dasharray="8 5"/>
+  <!-- 动平台半径圆 Rl -->
+  <circle cx="430" cy="320" r="46" fill="#dcfce7" stroke="#15803d" stroke-width="2.2"/>
+
+  <!-- 半径标注 -->
+  <line x1="430" y1="320" x2="590" y2="320" stroke="#1e40af" stroke-width="1.4"/>
+  <text x="500" y="312" font-size="14" fill="#1e40af" text-anchor="middle">Ru = 81.8</text>
+  <line x1="430" y1="320" x2="476" y2="320" stroke="#15803d" stroke-width="1.4"/>
+  <text x="452" y="342" font-size="13" fill="#15803d" text-anchor="middle">Rl</text>
+
+  <!-- 三条支链方位（0/120/240 度），屏幕 y 轴向下 -->
+  <line x1="430" y1="320" x2="590" y2="320" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <line x1="430" y1="320" x2="350" y2="181" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <line x1="430" y1="320" x2="350" y2="459" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4"/>
+
+  <!-- 电机位置 -->
+  <rect x="576" y="306" width="28" height="28" rx="5" fill="#1e40af"/>
+  <rect x="336" y="167" width="28" height="28" rx="5" fill="#1e40af"/>
+  <rect x="336" y="445" width="28" height="28" rx="5" fill="#1e40af"/>
+  <text x="614" y="326" font-size="15" fill="#1e3a8a">M1（θ1），φ = 0°</text>
+  <text x="216" y="164" font-size="15" fill="#1e3a8a">M2（θ2），φ = 120°</text>
+  <text x="216" y="500" font-size="15" fill="#1e3a8a">M3（θ3），φ = 240°</text>
+
+  <!-- 120 度角弧 -->
+  <path d="M 540 320 A 110 110 0 0 0 375 224" fill="none" stroke="#dc2626" stroke-width="2"/>
+  <text x="470" y="238" font-size="15" fill="#dc2626">120°</text>
+
+  <!-- 径向单位矢量 -->
+  <line x1="430" y1="320" x2="510" y2="320" stroke="#7c3aed" stroke-width="3"/>
+  <text x="500" y="356" font-size="14" fill="#7c3aed">u₁</text>
+
+  <!-- 说明 -->
+  <text x="46" y="560" font-size="14" fill="#374151">· 基座坐标系原点 O 取在固定平台中心，Z 轴垂直纸面向下（指向动平台一侧）。</text>
+  <text x="46" y="584" font-size="14" fill="#374151">· 第 i 条支链的方位角 φᵢ = 0° / 120° / 240°，其径向单位矢量 uᵢ = (cos φᵢ, sin φᵢ)。</text>
+  <text x="46" y="608" font-size="14" fill="#374151">· 末端径向坐标 pᵢ = x·cos φᵢ + y·sin φᵢ；上臂只在该方位所在的竖直平面内摆动。</text>
+</svg>

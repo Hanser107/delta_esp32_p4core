@@ -1,24 +1,32 @@
+/**
+ * @file app_http.c
+ * @brief HTTP 服务器实现：内嵌绘图界面与 REST 接口。
+ * @details 负责下发绘图页面、查询播放状态、提交笔划以及中止播放。
+ */
+
 #include "app_http.h"
 #include "app_pattern.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "cJSON.h"
+#include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 
-static const char *TAG = "http_server";
+static const char *TAG = "http";
 
-static httpd_handle_t g_server = NULL;
+/** @brief POST 请求体允许的最大字节数（绘图界面自身的限制远低于此值）。 */
+#define MAX_BODY_BYTES   65536
 
-/* ================================================================
- *  前端 HTML 页面（单文件，内嵌 CSS + JS）
- *  功能：
- *    - Canvas 绘图（支持鼠标 + 触摸）
- *    - 参数设置：Z坐标、速度、缩放
- *    - 发送到 ESP32
- *    - 状态指示
- * ================================================================ */
+static httpd_handle_t s_server;
+
+/**
+ * @brief 内嵌的单页绘图界面（HTML + CSS + JS）。
+ * @details 支持鼠标与触摸输入的 Canvas 绘图，提供速度 / 加速度滑块；
+ *          通过 POST /api/points 发送笔划，通过 POST /api/abort 中止。
+ */
 static const char INDEX_HTML[] = R"raw(
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -142,7 +150,7 @@ canvas:hover{box-shadow:0 0 30px rgba(233,69,96,0.4);}
 
 <div class="card">
   <canvas id="cv" width="380" height="380"></canvas>
-  <div class="coord-info">工作空间：&#x3A6;200mm 圆 | 圆心 = Delta(0,0) | 绘制 Z=-200 | 抬笔 Z=-140</div>
+  <div class="coord-info">工作空间：&#x3A6;200mm 圆 | 圆心 = Delta(0,0) | 绘制 Z=-248 | 抬笔 Z=-200</div>
   <div class="stroke-indicator" id="strokeDots"></div>
 </div>
 
@@ -427,7 +435,6 @@ async function sendPattern(){
 
   const payload = {
     strokes: strokeData,
-    z: -200.0,
     speed: speed,
     accel: accel
   };
@@ -477,267 +484,195 @@ initCanvas();
 </body>
 </html>
 )raw";
-/* ================================================================
- *  HTTP 请求处理器
- * ================================================================ */
 
-/* GET /  → 返回绘图页面 */
+/* ============================================================ 请求处理器 */
+
+static esp_err_t send_json(httpd_req_t *req, const char *json)
+{
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief GET / 路由：返回内嵌的绘图页面。 */
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, INDEX_HTML, sizeof(INDEX_HTML) - 1);
-    return ESP_OK;
+    return httpd_resp_send(req, INDEX_HTML, sizeof(INDEX_HTML) - 1);
 }
 
-/* GET /status → 返回机器人状态 */
+/** @brief GET /status 路由：返回播放状态。 */
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    char resp[128];
-    bool idle = pattern_player_is_idle();
-    uint8_t prog = pattern_player_progress();
-    snprintf(resp, sizeof(resp),
-             "{\"idle\":%s,\"progress\":%u}",
-             idle ? "true" : "false", prog);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"idle\":%s,\"progress\":%u}",
+             pattern_player_is_idle() ? "true" : "false",
+             pattern_player_progress());
+    return send_json(req, resp);
 }
 
-/* POST /api/abort → 中止播放 */
+/** @brief POST /api/abort 路由：中止当前播放。 */
 static esp_err_t abort_post_handler(httpd_req_t *req)
 {
     pattern_player_abort();
-    const char *resp = "{\"success\":true,\"message\":\"aborted\"}";
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+    return send_json(req, "{\"success\":true}");
 }
 
-
-/* POST /api/points → 接收图案点集（支持多笔划） */
+/**
+ * @brief POST /api/points 路由：解析笔划，将其展平为点列表后交给图案播放器。
+ * @note 用 NaN 标记笔划之间的抬笔。
+ */
 static esp_err_t points_post_handler(httpd_req_t *req)
 {
     int total_len = req->content_len;
-
-    if (total_len <= 0 || total_len > 65536) {
-        const char *err = "{\"success\":false,\"error\":\"payload too large or empty\"}";
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+    if (total_len <= 0 || total_len > MAX_BODY_BYTES) {
+        return send_json(req, "{\"success\":false,\"error\":\"invalid payload size\"}");
     }
 
-    char *body_buf = malloc(total_len + 1);
-    if (!body_buf) {
-        const char *err = "{\"success\":false,\"error\":\"server out of memory\"}";
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+    char *body = malloc(total_len + 1);
+    if (!body) {
+        return send_json(req, "{\"success\":false,\"error\":\"out of memory\"}");
     }
 
     int received = 0;
     while (received < total_len) {
-        int ret = httpd_req_recv(req, body_buf + received, total_len - received);
+        int ret = httpd_req_recv(req, body + received, total_len - received);
         if (ret <= 0) {
-            free(body_buf);
-            const char *err = "{\"success\":false,\"error\":\"receive failed\"}";
-            httpd_resp_set_type(req, "application/json");
-            httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
-            return ESP_FAIL;
+            free(body);
+            return send_json(req, "{\"success\":false,\"error\":\"receive failed\"}");
         }
         received += ret;
     }
-    body_buf[received] = '\0';
+    body[received] = '\0';
 
-    ESP_LOGI(TAG, "Received %d bytes JSON", received);
-
-    /* ---- 解析 JSON ---- */
-    cJSON *root = cJSON_Parse(body_buf);
-    free(body_buf);
-
+    cJSON *root = cJSON_Parse(body);
+    free(body);
     if (!root) {
-        const char *err = "{\"success\":false,\"error\":\"invalid JSON\"}";
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return send_json(req, "{\"success\":false,\"error\":\"invalid JSON\"}");
     }
 
-    /* ---- 提取参数 ---- */
-    float z_mm      = DRAW_Z_DEFAULT;
-    uint32_t speed  = 50;
-    uint8_t  accel  = 5;
+    /* ---- 可选参数及其服务端默认值 ---- */
+    float    z_mm    = DRAW_Z_DEFAULT;
+    uint32_t speed   = 50;
+    uint8_t  accel   = 5;
     uint32_t timeout = 3000;
 
-    //cJSON *z_item = cJSON_GetObjectItem(root, "z");
-    //if (cJSON_IsNumber(z_item)) z_mm = (float)z_item->valuedouble;
-
-    cJSON *sp_item = cJSON_GetObjectItem(root, "speed");
-    if (cJSON_IsNumber(sp_item)) speed = (uint32_t)sp_item->valueint;
-
-    cJSON *ac_item = cJSON_GetObjectItem(root, "accel");
-    if (cJSON_IsNumber(ac_item)) accel = (uint8_t)ac_item->valueint;
-
-    /* ---- 提取笔划数据 ---- */
-    pattern_point_t *all_pts = malloc(PATTERN_MAX_POINTS * sizeof(pattern_point_t));
-    if (!all_pts) {
-        cJSON_Delete(root);
-        const char *err = "{\"success\":false,\"error\":\"memory allocation failed\"}";
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+    cJSON *speed_item = cJSON_GetObjectItem(root, "speed");
+    if (cJSON_IsNumber(speed_item)) {
+        speed = (uint32_t)speed_item->valueint;
+    }
+    cJSON *accel_item = cJSON_GetObjectItem(root, "accel");
+    if (cJSON_IsNumber(accel_item)) {
+        accel = (uint8_t)accel_item->valueint;
     }
 
-    uint16_t total_valid = 0;
+    /* ---- 将笔划展平为单个点列表 ---- */
+    pattern_point_t *points = malloc(PATTERN_MAX_POINTS * sizeof(*points));
+    if (!points) {
+        cJSON_Delete(root);
+        return send_json(req, "{\"success\":false,\"error\":\"out of memory\"}");
+    }
 
-    /* 尝试 strokes（二维数组） */
-    cJSON *strokes_arr = cJSON_GetObjectItem(root, "strokes");
-    if (cJSON_IsArray(strokes_arr)) {
-        int num_strokes = cJSON_GetArraySize(strokes_arr);
-        ESP_LOGI(TAG, "Received %d strokes", num_strokes);
+    uint16_t count = 0;
+    cJSON *strokes = cJSON_GetObjectItem(root, "strokes");
+    if (cJSON_IsArray(strokes)) {
+        int num_strokes = cJSON_GetArraySize(strokes);
 
-        for (int s = 0; s < num_strokes && total_valid < PATTERN_MAX_POINTS - 2; s++) {
-            cJSON *stroke = cJSON_GetArrayItem(strokes_arr, s);
-            if (!cJSON_IsArray(stroke)) continue;
+        for (int s = 0; s < num_strokes && count < PATTERN_MAX_POINTS - 1; s++) {
+            cJSON *stroke = cJSON_GetArrayItem(strokes, s);
+            if (!cJSON_IsArray(stroke)) {
+                continue;
+            }
 
             int pt_count = cJSON_GetArraySize(stroke);
-            for (int i = 0; i < pt_count && total_valid < PATTERN_MAX_POINTS - 2; i++) {
+            int added = 0;
+            for (int i = 0; i < pt_count && count < PATTERN_MAX_POINTS - 1; i++) {
                 cJSON *pt = cJSON_GetArrayItem(stroke, i);
-                if (cJSON_IsArray(pt) && cJSON_GetArraySize(pt) >= 2) {
-                    cJSON *x = cJSON_GetArrayItem(pt, 0);
-                    cJSON *y = cJSON_GetArrayItem(pt, 1);
-                    if (cJSON_IsNumber(x) && cJSON_IsNumber(y)) {
-                        all_pts[total_valid].x = (float)x->valuedouble;
-                        all_pts[total_valid].y = (float)y->valuedouble;
-                        total_valid++;
-                    }
+                if (!cJSON_IsArray(pt) || cJSON_GetArraySize(pt) < 2) {
+                    continue;
                 }
-            }
-            /* ★ 笔划之间插入分隔标记（用 NaN 表示） */
-            if (s < num_strokes - 1 && total_valid < PATTERN_MAX_POINTS - 1) {
-                all_pts[total_valid].x = NAN;   /* 抬笔标记 */
-                all_pts[total_valid].y = NAN;
-                total_valid++;
-            }
-        }
-    }
-    /* 兼容旧格式：points（一维数组） */
-    else {
-        cJSON *points_arr = cJSON_GetObjectItem(root, "points");
-        if (cJSON_IsArray(points_arr)) {
-            int num = cJSON_GetArraySize(points_arr);
-            for (int i = 0; i < num && total_valid < PATTERN_MAX_POINTS; i++) {
-                cJSON *pt = cJSON_GetArrayItem(points_arr, i);
-                if (cJSON_IsArray(pt) && cJSON_GetArraySize(pt) >= 2) {
-                    cJSON *x = cJSON_GetArrayItem(pt, 0);
-                    cJSON *y = cJSON_GetArrayItem(pt, 1);
-                    if (cJSON_IsNumber(x) && cJSON_IsNumber(y)) {
-                        all_pts[total_valid].x = (float)x->valuedouble;
-                        all_pts[total_valid].y = (float)y->valuedouble;
-                        total_valid++;
-                    }
+                cJSON *x = cJSON_GetArrayItem(pt, 0);
+                cJSON *y = cJSON_GetArrayItem(pt, 1);
+                if (!cJSON_IsNumber(x) || !cJSON_IsNumber(y)) {
+                    continue;
                 }
+                points[count].x = (float)x->valuedouble;
+                points[count].y = (float)y->valuedouble;
+                count++;
+                added++;
             }
-        }
-    }
 
+            /* 在包含真实几何图形的笔划之间插入抬笔标记。 */
+            if (added >= 2 && s < num_strokes - 1 && count < PATTERN_MAX_POINTS - 1) {
+                points[count].x = NAN;
+                points[count].y = NAN;
+                count++;
+            }
+        }
+    }
     cJSON_Delete(root);
 
-    if (total_valid < 2) {
-        free(all_pts);
-        const char *err = "{\"success\":false,\"error\":\"not enough valid points\"}";
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+    if (count < 2) {
+        free(points);
+        return send_json(req, "{\"success\":false,\"error\":\"not enough valid points\"}");
     }
 
-    /* ---- 打印接收到的点集 ---- */
-  // 统计笔划数（抬笔标记个数 + 1）
-  int stroke_count = 1;
-  for (uint16_t i = 0; i < total_valid; i++) {
-    if (isnan(all_pts[i].x)) stroke_count++;
-  }
-  // 避免连续 NaN 导致多计数，但传入数据由 HTTP 解析保证格式，直接使用即可
-
-  ESP_LOGI(TAG, "Pattern received: %u points, %d strokes, Z=%.1f, speed=%lu, accel=%u",
-           total_valid, stroke_count, z_mm, speed, accel);
-
-  int current_stroke = 1;
-  for (uint16_t i = 0; i < total_valid; i++) {
-    if (isnan(all_pts[i].x)) {
-      //ESP_LOGI(TAG, "  --- lift pen (end of stroke %d) ---", current_stroke);
-      //current_stroke++;
-    } else {
-      // ESP_LOGI(TAG, "  [stroke %d] pt[%u] = (%.1f, %.1f, %.1f)",
-      //          current_stroke, i,
-      //          (double)all_pts[i].x, (double)all_pts[i].y, (double)z_mm);
+    int stroke_count = 0;
+    bool in_stroke = false;
+    for (uint16_t i = 0; i < count; i++) {
+        if (isnan(points[i].x)) {
+            in_stroke = false;
+        } else if (!in_stroke) {
+            stroke_count++;
+            in_stroke = true;
+        }
     }
-  }
 
-    /* ---- 提交给图案播放器 ---- */
-    esp_err_t ret = pattern_player_load(all_pts, total_valid, z_mm, speed, accel, timeout);
-    free(all_pts);
+    ESP_LOGI(TAG, "Received %u points in %d strokes (Z=%.1f, speed=%lu, accel=%u)",
+             count, stroke_count, (double)z_mm, (unsigned long)speed, accel);
 
-    char resp[256];
-    if (ret == ESP_OK) {
-        snprintf(resp, sizeof(resp),
-                 "{\"success\":true,\"point_count\":%u,\"z\":%.1f}", total_valid, z_mm);
-    } else {
-        snprintf(resp, sizeof(resp),
-                 "{\"success\":false,\"error\":\"player busy\"}");
+    esp_err_t ret = pattern_player_load(points, count, z_mm, speed, accel, timeout);
+    free(points);
+
+    if (ret != ESP_OK) {
+        return send_json(req, "{\"success\":false,\"error\":\"player busy\"}");
     }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
 
-    return ESP_OK;
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+             "{\"success\":true,\"point_count\":%u,\"stroke_count\":%d}",
+             count, stroke_count);
+    return send_json(req, resp);
 }
-/* ================================================================
- *  服务器启停
- * ================================================================ */
+
+/* ============================================================= 生命周期 */
+
 esp_err_t http_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 8;
-    config.stack_size = 12288;
+    config.max_uri_handlers  = 8;
+    config.stack_size        = 12288;
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
 
-    if (httpd_start(&g_server, &config) != ESP_OK) {
+    if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
         return ESP_FAIL;
     }
 
-    /* 注册 URI 处理器 */
-    httpd_uri_t uri_root = {
-        .uri = "/", .method = HTTP_GET,
-        .handler = root_get_handler, .user_ctx = NULL
+    const httpd_uri_t routes[] = {
+        { .uri = "/",           .method = HTTP_GET,  .handler = root_get_handler   },
+        { .uri = "/status",     .method = HTTP_GET,  .handler = status_get_handler },
+        { .uri = "/api/points", .method = HTTP_POST, .handler = points_post_handler },
+        { .uri = "/api/abort",  .method = HTTP_POST, .handler = abort_post_handler },
     };
-    httpd_register_uri_handler(g_server, &uri_root);
 
-    httpd_uri_t uri_status = {
-        .uri = "/status", .method = HTTP_GET,
-        .handler = status_get_handler, .user_ctx = NULL
-    };
-    httpd_register_uri_handler(g_server, &uri_status);
-
-    httpd_uri_t uri_points = {
-        .uri = "/api/points", .method = HTTP_POST,
-        .handler = points_post_handler, .user_ctx = NULL
-    };
-    httpd_register_uri_handler(g_server, &uri_points);
-
-    httpd_uri_t uri_abort = {
-        .uri = "/api/abort", .method = HTTP_POST,
-        .handler = abort_post_handler, .user_ctx = NULL
-    };
-    httpd_register_uri_handler(g_server, &uri_abort);
-
-    ESP_LOGI(TAG, "HTTP server started on port %d", config.server_port);
-    return ESP_OK;
-}
-
-void http_server_stop(void)
-{
-    if (g_server) {
-        httpd_stop(g_server);
-        g_server = NULL;
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        esp_err_t ret = httpd_register_uri_handler(s_server, &routes[i]);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register %s", routes[i].uri);
+        }
     }
+
+    ESP_LOGI(TAG, "HTTP server listening on port %d", config.server_port);
+    return ESP_OK;
 }
